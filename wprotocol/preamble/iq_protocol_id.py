@@ -345,6 +345,209 @@ LORA_BANDWIDTHS = (7.8e3, 10.4e3, 15.6e3, 20.8e3, 31.25e3, 41.7e3,
                    62.5e3, 125e3, 250e3, 500e3)
 
 
+def _delay_correlate(x: np.ndarray, tau: int, window: int):
+    """Sliding normalised delay-and-correlate.
+
+    Returns ``(rho, raw)`` where ``rho[n]`` is the scale-free statistic over a
+    ``window``-sample span starting at ``n`` and ``raw[n]`` is the unnormalised
+    complex accumulation, whose argument carries the carrier offset.
+    """
+    x = np.asarray(x, dtype=np.complex128)
+    if tau < 1 or window < 8 or x.size <= tau + window:
+        return None, None
+    prod = x[:-tau] * np.conj(x[tau:])
+    raw = np.convolve(prod, np.ones(window), mode="valid")
+    e = np.abs(x) ** 2
+    cs = np.concatenate(([0.0], np.cumsum(e)))
+    ea = cs[window:] - cs[:-window]
+    m = raw.size
+    den = np.sqrt(np.maximum(ea[:m], 1e-30) * np.maximum(ea[tau:tau + m], 1e-30))
+    return np.abs(raw) / den, raw
+
+
+def repetition_threshold(window: int, n_trials: int, p_fa: float = 1e-6) -> float:
+    """Threshold for the delay-and-correlate statistic, same form as the
+    matched filter's but over the correlation window rather than a template."""
+    n_eff = max(2, window) - 1
+    t = math.sqrt(max(0.0, math.log(max(n_trials, 1) / max(p_fa, 1e-300))) / n_eff)
+    return float(min(t, 0.999))
+
+
+def repetition_floor_db(window: int, n_trials: int, p_fa: float = 1e-6) -> float:
+    """SNR floor for repetition detection.
+
+    Both factors in the product are noisy, so the peak follows
+    ``gamma/(1+gamma)`` rather than the matched filter's
+    ``sqrt(gamma/(1+gamma))``. Setting peak = threshold and inverting gives a
+    floor that is the *square root* of the matched filter's in linear terms —
+    a squaring loss measured at 11.9 dB for a LoRa SF7 preamble.
+    """
+    t = repetition_threshold(window, n_trials, p_fa)
+    t = min(t, 0.999)
+    return 10.0 * math.log10(t / max(1.0 - t, 1e-12))
+
+
+def detect_repetition(
+    x: np.ndarray,
+    fs: float,
+    bw_hint: Optional[float] = None,
+    max_period: int = 4096,
+    n_repeats: int = 6,
+    n_candidates: int = 6,
+    p_fa: float = 1e-6,
+    rho_floor: float = 0.30,
+):
+    """Template-free detection of a repeating preamble.
+
+    Many protocols open with a *self-repeating* pattern: 8 identical LoRa
+    upchirps, 802.11's ten 16-sample training symbols, an alternating 1010
+    GFSK preamble, or 802.15.4's eight identical zero-symbols. Detecting the
+    repetition needs the *period*, never the content — which is why this works
+    on protocols whose sequence constants we do not have, and why it cannot be
+    fooled by a wrong constant.
+
+    Two properties make it worth a tier of its own:
+
+    * **Carrier-offset blind.** Under an offset, every product term picks up the
+      same constant factor ``exp(-j2*pi*df*tau/fs)``, independent of n, so it
+      passes straight through the magnitude. Measured: rho held at 0.909 from
+      0 to 20 kHz offset, where a single-bin matched filter fell from 0.95 to
+      0.003.
+    * **It yields the offset for free** from ``arg`` of the accumulation, though
+      only modulo ``fs/tau`` — see ``cfo_hz`` below.
+
+    Guards that the naive version needs:
+
+    * **Minimum lag.** An oversampled waveform is trivially self-correlated at
+      short lags, so an unguarded search returns the smallest lag every time
+      (tau=4 against a true 512 for LoRa). The floor is a few Nyquist intervals
+      of the occupied bandwidth.
+    * **Harmonic walk.** A signal repeating at tau also repeats at 2*tau and
+      6*tau, and the raw peak is often a multiple (32 for a true 16 on BLE, 640
+      for a true 107 on POCSAG). The walk down to the fundamental is chained:
+      accepting tau/6 requires tau/2 and tau/3 to have held first.
+
+    Returns ``None``, or a dict with ``period``, ``rho``, ``threshold``,
+    ``sample``, ``cfo_hz``, ``cfo_ambiguity_hz``, ``symbol_rate_hint`` and
+    ``window``.
+    """
+    x = np.asarray(x, dtype=np.complex64)
+    # The waveform's own correlation length is ~fs/B, so the guard must exceed
+    # that to reject trivial short-lag self-correlation. It must not exceed it by
+    # much: an alternating 1010 preamble has a genuine period of two symbols,
+    # which for BLE at 8 samples/symbol is 16 lags, and a 4*fs/B guard of 32
+    # excluded the real answer. 1.5x rejects the trivial peak (tau = fs/B) while
+    # leaving two-symbol periodicity reachable.
+    min_period = max(4, int(round(1.5 * fs / max(bw_hint or fs, 1.0))))
+    prom_floor = 0.08
+    max_period = int(min(max_period, x.size // (n_repeats + 1)))
+    if max_period <= min_period or x.size < 512:
+        return None
+
+    # Coarse pass: one FFT autocorrelation over the whole record picks candidate
+    # lags cheaply, so the expensive sliding statistic runs only a few times.
+    nfft = 1 << int(np.ceil(np.log2(2 * x.size)))
+    X = np.fft.fft(x.astype(np.complex128), nfft)
+    r = np.abs(np.fft.ifft(X * np.conj(X)))[: max_period + 1]
+    r = r / (r[0] + 1e-30)
+    band = r[min_period : max_period + 1]
+    if band.size < 4:
+        return None
+    order = np.argsort(band)[::-1]
+    cands, seen = [], set()
+    for k in order:
+        tau = int(min_period + k)
+        if any(abs(tau - t) <= max(2, tau // 20) for t in seen):
+            continue
+        seen.add(tau)
+        cands.append(tau)
+        if len(cands) >= n_candidates:
+            break
+
+    def score(tau: int):
+        window = int(min(n_repeats * tau, x.size - tau - 1))
+        rho, raw = _delay_correlate(x, tau, window)
+        if rho is None or rho.size == 0:
+            return None
+        i = int(np.argmax(rho))
+        return {"period": tau, "rho": float(rho[i]), "sample": i,
+                "window": window, "phase": float(np.angle(raw[i]))}
+
+    def prominence(tau: int, v: Optional[dict] = None) -> float:
+        """How much rho at ``tau`` exceeds rho at neighbouring lags.
+
+        The discriminator that magnitude alone cannot provide. An oversampled
+        waveform is self-correlated over a *broad plateau* around tau ~ fs/B, so
+        rho there is large at every nearby lag; genuine periodicity is a sharp
+        local peak with low correlation between multiples. Without this test the
+        harmonic walk slides down the plateau (LoRa 512 -> 6) and random payload
+        false-alarms on every trial at exactly tau = fs/B.
+        """
+        v = v or score(tau)
+        if v is None:
+            return -1.0
+        d = max(2, tau // 4)
+        side = [score(tau - d), score(tau + d)]
+        ref = max((w["rho"] for w in side if w), default=0.0)
+        return v["rho"] - ref
+
+    scored = [v for v in (score(t) for t in cands) if v]
+    scored = [v for v in scored if prominence(v["period"], v) > prom_floor]
+    if not scored:
+        return None
+    best = max(scored, key=lambda v: v["rho"])
+
+    # chained walk down to the fundamental
+    for _ in range(4):
+        moved = False
+        for div in (2, 3, 5):
+            tau2 = int(round(best["period"] / div))
+            if tau2 < min_period:
+                continue
+            cand = max((score(t) for t in (tau2 - 1, tau2, tau2 + 1)
+                        if t >= min_period),
+                       key=lambda v: v["rho"] if v else -1.0, default=None)
+            if (cand and cand["rho"] > 0.7 * best["rho"]
+                    and prominence(cand["period"], cand) > prom_floor):
+                best = cand
+                moved = True
+                break
+        if not moved:
+            break
+
+    n_trials = max(1, int(4 * x.size / max(best["window"], 1))) * max(1, len(cands))
+    thr = repetition_threshold(best["window"], n_trials, p_fa)
+
+    # Two guards beyond the statistical threshold, for the same reason the
+    # matched filter needed them: equation-derived thresholds bound false alarms
+    # against *noise*, and random modulated payload is not noise. Random GFSK
+    # data produced accidental long-period "repetitions" clearing the threshold
+    # on 7 of 24 trials, because at window = 6*tau the threshold is very low.
+    #
+    #  - rho_floor: a real repeated preamble at usable SNR gives rho ~ g/(1+g),
+    #    already >= 0.5 at 0 dB, so an absolute floor costs nothing real.
+    #  - upward harmonic consistency: a K-fold repeated preamble is periodic, so
+    #    it must also correlate at 2*tau. An accidental match does not.
+    twice = score(2 * best["period"])
+    harmonic_ok = bool(twice and twice["rho"] > 0.5 * best["rho"])
+    if best["rho"] < max(thr, rho_floor) or not harmonic_ok:
+        return None
+
+    # arg(R) = -2*pi*df*tau/fs, so the offset is recovered only modulo fs/tau
+    amb = fs / best["period"]
+    cfo = -best["phase"] * fs / (2.0 * np.pi * best["period"])
+    return {
+        "period": int(best["period"]),
+        "rho": best["rho"],
+        "threshold": thr,
+        "sample": best["sample"],
+        "window": best["window"],
+        "cfo_hz": float(cfo),
+        "cfo_ambiguity_hz": float(amb),
+        "symbol_rate_hint": float(fs / best["period"]),
+    }
+
+
 def detect_chirp(x: np.ndarray, fs: float, bw_hint: Optional[float] = None):
     """Chirp-spread-spectrum (LoRa) detector by dechirping.
 
@@ -644,6 +847,11 @@ class Features:
     ofdm_cp: Optional[int] = None
     ofdm_score: Optional[float] = None
     subcarrier_spacing: Optional[float] = None
+    rep_period: Optional[int] = None
+    rep_rho: Optional[float] = None
+    rep_cfo: Optional[float] = None
+    rep_cfo_ambiguity: Optional[float] = None
+    rep_period_rate: Optional[float] = None
     chirp_rate: Optional[float] = None
     chirp_score: Optional[float] = None
     css_bw: Optional[float] = None
@@ -651,7 +859,8 @@ class Features:
     notes: list[str] = field(default_factory=list)
 
 
-def extract_features(x: np.ndarray, fs: float, burst: Burst, noise_db: float) -> Features:
+def extract_features(x: np.ndarray, fs: float, burst: Burst, noise_db: float,
+                     symbol_rate_override: Optional[float] = None) -> Features:
     seg = x[burst.i0 : burst.i1]
     if seg.size < 64:
         raise ValueError("burst too short for analysis")
@@ -716,8 +925,27 @@ def extract_features(x: np.ndarray, fs: float, burst: Burst, noise_db: float) ->
         ft.css_bw = ch["bw"]
         ft.css_sf = ch["sf"]
 
+    # --- repetition / self-similarity (template-free preamble structure) ---
+    rep = detect_repetition(seg_c, fs_a, bw_hint=bw99)
+    if rep:
+        ft.rep_period = rep["period"]
+        ft.rep_rho = rep["rho"]
+        ft.rep_cfo = rep["cfo_hz"]
+        ft.rep_cfo_ambiguity = rep["cfo_ambiguity_hz"]
+        ft.rep_period_rate = rep["symbol_rate_hint"]
+        ft.notes.append(
+            f"repeating structure at {rep['period']} samples "
+            f"(rho {rep['rho']:.2f}); CFO {rep['cfo_hz']:+.0f} Hz "
+            f"modulo {rep['cfo_ambiguity_hz']:.0f} Hz")
+
     # --- symbol / chip rate (needed before tone counting) ---
-    sr = estimate_symbol_rate(seg_c, fs_a, bw_hint=bw99)
+    if symbol_rate_override:
+        # Stage 3: a confirmed preamble hit knows the rate exactly, so we skip
+        # the estimator rather than average two disagreeing answers.
+        sr = {"symbol_rate": float(symbol_rate_override), "line_snr": 99.0,
+              "method": "preamble template (exact)"}
+    else:
+        sr = estimate_symbol_rate(seg_c, fs_a, bw_hint=bw99)
     if cv > 0.60:                                   # pulsed: trust run lengths
         pr = estimate_pulse_rate(seg_c, fs_a)
         if pr and (sr is None or pr["line_snr"] >= (sr["line_snr"] or 0) * 0.5):
@@ -1060,6 +1288,7 @@ def identify(
     bursts = sorted(bursts, key=lambda b: b.i0)
 
     out = []
+    burst_of: dict[int, Burst] = {}
     for b in bursts:
         try:
             ft = extract_features(x, fs, b, noise_db)
@@ -1069,6 +1298,7 @@ def identify(
         cands = [c for c in cands if c["score"] > 0.02]
         cands.sort(key=lambda c: -c["score"])
         out.append(BurstResult(features=ft, candidates=cands[:top]))
+        burst_of[id(out[-1])] = b
 
     if preamble_bank is None:
         return out
@@ -1133,6 +1363,25 @@ def identify(
                      f"implied per-sample SNR {hit.est_snr_db:+.1f} dB"],
         )] + [c for c in target.candidates if c["name"] != hit.name][: max(0, top - 1)]
 
+    # Stage 3: re-measure with parameters the hit supplies. The blind estimate of
+    # the symbol rate is the input the fragile parts of tone counting depend on,
+    # and it is the first thing to break: on narrowband 4-FSK at 15 dB the blind
+    # estimator returned 1.7 kHz against a true 4800 and tone counting failed 4
+    # trials in 6, where the template's exact rate gave 6/6. Cheap, because it
+    # replaces the estimator rather than adding to it.
+    for r in out:
+        hit = r.preamble
+        b = burst_of.get(id(r))
+        rate = getattr(hit, "symbol_rate", None) if hit is not None else None
+        if hit is None or b is None or not rate:
+            continue
+        try:
+            ft2 = extract_features(x, fs, b, noise_db, symbol_rate_override=rate)
+        except ValueError:
+            continue
+        ft2.notes.append(f"re-measured with {hit.name} template parameters")
+        r.features = ft2
+
     out.sort(key=lambda r: r.features.t0)
     return out
 
@@ -1172,6 +1421,10 @@ def format_report(results: Sequence[BurstResult], verbose: bool = False) -> str:
         if ft.ofdm_fft:
             lines.append(f"  OFDM           FFT≈{ft.ofdm_fft} samp, CP≈{ft.ofdm_cp}, "
                          f"SCS≈{_hz(ft.subcarrier_spacing)} (z={ft.ofdm_score:.1f})")
+        if ft.rep_period:
+            lines.append(f"  repetition     period {ft.rep_period} samp "
+                         f"(rho {ft.rep_rho:.2f}), CFO {ft.rep_cfo:+.0f} Hz "
+                         f"mod {_hz(ft.rep_cfo_ambiguity)}")
         if ft.chirp_score and ft.chirp_score > 0.10:
             lines.append(f"  CSS            BW≈{_hz(ft.css_bw)}, SF≈{ft.css_sf}, "
                          f"{ft.chirp_rate/1e6:.4g} MHz/s, "

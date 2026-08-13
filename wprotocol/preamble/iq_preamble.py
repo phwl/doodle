@@ -429,6 +429,7 @@ class PreambleHit:
     processing_gain_db: float
     est_snr_db: float
     spec: str
+    symbol_rate: float = 0.0        # from the template; feeds Stage-3 re-measure
     verified: bool = True
     decimation: int = 1
     shadowed: list = field(default_factory=list)   # cross-talk, suppressed
@@ -452,12 +453,18 @@ class PreambleBank:
 
     def __init__(self, templates: Optional[Sequence[Template]] = None,
                  p_fa: float = 1e-6, sps_target: float = 8.0,
-                 max_block: int = 1 << 18, min_margin: float = 1.0,
+                 max_block: int = 1 << 18, min_margin: float = 1.05,
                  suppress_overlap: bool = True):
         self.templates = list(templates) if templates is not None else default_templates()
         self.p_fa = p_fa
         self.sps_target = sps_target
         self.max_block = max_block
+        # 1.05, not 1.0. A threshold is the point where a *noise* peak becomes
+        # unlikely, so hits sitting exactly on it are the ones most likely to be
+        # cross-talk rather than signal. A long template makes this worse, since
+        # its threshold is low. Kept small deliberately: raising it to 1.20 cost
+        # the short SiK template 6 dB of sensitivity, because margin is the wrong
+        # lever for this problem -- see the ranking note in _suppress.
         self.min_margin = min_margin
         self.suppress_overlap = suppress_overlap
 
@@ -544,10 +551,19 @@ class PreambleBank:
                 processing_gain_db=10.0 * math.log10(
                     r.size / math.log(max(n_trials, 2) / self.p_fa)),
                 est_snr_db=10.0 * math.log10(max(gamma, 1e-12)),
-                spec=tpl.spec, verified=tpl.verified, decimation=decim,
+                spec=tpl.spec, symbol_rate=float(tpl.symbol_rate),
+                verified=tpl.verified, decimation=decim,
             ))
 
-        hits.sort(key=lambda h: -(h.rho / max(h.threshold, 1e-9)))
+        # Rank by *implied SNR*, not by margin. Margin rho/t is not comparable
+        # across templates: t scales as 1/sqrt(N), so a long template earns a
+        # large margin from a marginal correlation, which is how a 2728-sample
+        # LoRa template outranked the correct SiK match on a SiK capture. The
+        # implied SNR from equation (2) estimates the same physical quantity
+        # whatever the template length, so it is comparable -- and it is the
+        # quantity that exposes cross-talk, which always implies far less signal
+        # than is actually present.
+        hits.sort(key=lambda h: (-h.est_snr_db, -(h.rho / max(h.threshold, 1e-9))))
         return self._suppress(hits) if self.suppress_overlap else hits
 
     @staticmethod

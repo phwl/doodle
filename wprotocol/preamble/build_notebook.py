@@ -92,17 +92,17 @@ burst segmentation, spectral estimation, amplitude statistics, the FM
 discriminator and its noise threshold, OFDM cyclic prefixes, chirp spread
 spectrum, cyclostationary symbol-rate estimation, eye-diagram tone counting
 
-**Part III — Classification** &nbsp;(§15–18)
+**Part III — Classification** &nbsp;(§17–19)
 feature assembly, modulation-family decision, protocol database, scoring
 
-**Part IV — Validating the blind path** &nbsp;(§19–20)
+**Part IV — Validating the blind path** &nbsp;(§21–21)
 eight synthetic protocols, multi-burst segmentation, and the SNR floor
 
-**Part V — The preamble matched filter** &nbsp;(§21–26)
+**Part V — The preamble matched filter** &nbsp;(§22–27)
 why the floor exists, detection theory, template bank, carrier-offset search,
 template cross-talk, and the measured floors
 
-**Part VI — Limitations** &nbsp;(§27)
+**Part VI — Limitations** &nbsp;(§29)
 
 ## A note on provenance
 
@@ -114,7 +114,7 @@ verification cells are what caught them.
 
 Where I cite a standard, I am working from memory of the specification rather
 than from the document itself, and I have flagged the places where that
-matters. In particular §22 discusses one template constant I deliberately
+matters. In particular §23 discusses one template constant I deliberately
 excluded because I do not trust my recall of it.
 """)
 
@@ -144,7 +144,7 @@ The quantities we want to recover, and the section that derives each:
 |---|---|---|
 | Occupied bandwidth | $B$ | §6 |
 | Symbol (or chip) rate | $R_s = 1/T$ | §11 |
-| Modulation family | — | §16 |
+| Modulation family | — | §17 |
 | Frequency deviation, tone count | $\Delta f_{\text{dev}}$, $M$ | §12 |
 | OFDM FFT size, cyclic prefix | $N$, $L$ | §9 |
 | Chirp bandwidth, spreading factor | $B$, $\mathrm{SF}$ | §10 |
@@ -931,9 +931,167 @@ print(f"fsk_tones -> {r['n_tones']} tones via {r['method']}, "
 
 # ---------------------------------------------------------------------------
 md(r"""
+## 14. Autocorrelation: a third detection tier
+
+Autocorrelation already appears once above, narrowly, for OFDM cyclic prefixes
+(§10). As a general feature it deserves its own tier, because it detects
+*repetition* — and many protocols open with a self-repeating pattern: 8 identical
+LoRa upchirps, 802.11's ten 16-sample training symbols, an alternating 1010 GFSK
+preamble, 802.15.4's eight identical zero-symbols.
+
+Crucially, detecting repetition needs the **period**, never the content.
+
+### It is carrier-offset blind
+
+This is the property that earns it a place. Under an offset,
+$x[n] \to x[n]e^{j2\pi\Delta f n/f_s}$, so each product term picks up
+
+$$x[n]\,x^*[n+\tau] \;\longrightarrow\; x[n]x^*[n{+}\tau]\;e^{-j2\pi \Delta f \tau / f_s}$$
+
+a factor that is **independent of $n$**. It is a constant across the whole sum
+and dies inside the magnitude. Measured: $\rho$ held at 0.909 from 0 to 20 kHz
+offset, while a single-bin matched filter fell from 0.95 to 0.003. The matched
+filter needs its whole frequency grid to survive; this needs nothing.
+
+### It returns the offset for free — modulo an alias
+
+$$\arg R(\tau) = -\frac{2\pi \Delta f \tau}{f_s}
+\qquad\Longrightarrow\qquad
+\Delta f = -\frac{f_s \arg R(\tau)}{2\pi\tau} \ \ \left(\text{mod } \frac{f_s}{\tau}\right)$$
+
+Precise but aliased. At LoRa's $\tau=512$ the unambiguous span is only $\pm 488$
+Hz, so an injected 3000 Hz reads as 70 Hz — $3000 - 3\cdot977$, exactly the fold.
+Using this to collapse the matched filter's grid therefore needs a staged
+short-lag/long-lag scheme, not a single lag.
+
+### The cost: squaring loss
+
+Both factors in the product are noisy, so unlike the matched filter's
+$\sqrt{\gamma/(1+\gamma)}$, the peak follows
+
+$$\boxed{\;\mathbb{E}[\rho_{\text{AC}}] \approx \frac{\gamma}{1+\gamma}\;}$$
+
+which degrades **twice as fast in dB**. Measured against theory: 0.5019 vs
+0.5000 at 0 dB, 0.1973 vs 0.2008 at &minus;6 dB, 0.0562 vs 0.0594 at &minus;12 dB.
+For a LoRa SF7 preamble this is a **+11.9 dB** penalty relative to matched
+filtering — the price of not needing the waveform.
+
+### Three guards the naive version needs
+
+Each of these was a measured failure, not a precaution.
+
+1. **Minimum lag.** An oversampled waveform is trivially self-correlated at
+   short lags, so an unguarded search returns the smallest lag every time:
+   $\tau=4$ against a true 512 for LoRa. But the guard must not be too large
+   either — an alternating 1010 preamble has a genuine period of two symbols,
+   16 lags for BLE at 8 sps, and a $4f_s/B$ guard of 32 excluded the right
+   answer. $1.5 f_s/B$ threads it.
+2. **Local prominence.** Magnitude alone cannot tell a broad plateau from real
+   periodicity. Trivial self-correlation is high at *every* nearby lag; genuine
+   periodicity is a sharp local peak. Without this test the harmonic walk slid
+   down the plateau (LoRa 512 → 6) and random GFSK payload false-alarmed on
+   **10 of 10** trials at exactly $\tau = f_s/B$.
+3. **Harmonic handling, both directions.** A signal repeating at $\tau$ also
+   repeats at $2\tau$ and $6\tau$, and the raw peak is often a multiple — 640
+   for a true 107 on POCSAG. Walking *down* needs the same chaining as §12.
+   Walking *up* is a **test**: a $K$-fold repeated preamble must also correlate
+   at $2\tau$, and an accidental match does not. That check removed most of the
+   residual false alarms.
+
+Plus one guard that is not statistical at all: an **absolute $\rho$ floor**.
+Equation-derived thresholds bound false alarms against *noise*, and random
+modulated payload is not noise — accidental long-period matches cleared the
+threshold on 7 of 24 trials, because at a window of $6\tau$ the threshold is
+very low. Since a real repeated preamble gives $\rho \approx \gamma/(1+\gamma)
+\ge 0.5$ at 0 dB, a floor of 0.30 costs nothing real and removes them.
+
+It does cost sensitivity, and the trade is explicit: $\rho > 0.30$ implies
+$\gamma > 0.43$, i.e. a floor of **&minus;3.7 dB** rather than the &minus;10.6 dB
+the statistics alone would allow. `rho_floor` is a parameter so you can choose.
+""")
+
+code(S(PID, "_delay_correlate", "repetition_threshold", "repetition_floor_db"))
+code(S(PID, "detect_repetition"))
+
+md(r"""
+Verifying all of it: offset invariance, period recovery, the false-alarm guards,
+and where the tier sits.
+""")
+
+code(r"""
+from iq_preamble import synth_css_upchirps, synth_gfsk, _bits as _pbits
+_rg = np.random.default_rng(11)
+
+def _noisy(x, snr_db, cfo_hz=0.0, fs=1.0):
+    if cfo_hz:
+        x = x * np.exp(2j * np.pi * cfo_hz * np.arange(x.size) / fs)
+    p = np.mean(np.abs(x) ** 2)
+    n = math.sqrt(p / (2 * 10 ** (snr_db / 10)))
+    return (x + n * (_rg.standard_normal(x.size)
+                     + 1j * _rg.standard_normal(x.size))).astype(np.complex64)
+
+fs_l, bw_l, sf_l = 500e3, 125e3, 7
+nsym_l = int(round(2 ** sf_l * fs_l / bw_l))
+pre_l = synth_css_upchirps(fs_l, bw_l, sf_l, 12)
+
+print("(a) carrier-offset invariance of |R(tau)|")
+print(f"    {'CFO kHz':>9} {'autocorr rho':>14}")
+for cfo in (0, 500, 2000, 8000, 20000):
+    rho, _ = _delay_correlate(_noisy(pre_l, 10.0, cfo, fs_l), nsym_l, 6 * nsym_l)
+    print(f"    {cfo/1e3:9.1f} {rho.max():14.4f}")
+
+print("\n(b) period recovery, with all guards active")
+print(f"    {'signal':24s} {'found':>7} {'true':>6} {'rho':>7} {'CFO est':>9} {'alias +/-':>10}")
+for nm, wave, fsx, bwx, tt in [
+        ("LoRa SF7 (12 upchirps)", pre_l, fs_l, bw_l, nsym_l),
+        ("BLE 0xAA GFSK 1M", synth_gfsk(_pbits("01" * 60), 8e6, 1e6, 250e3), 8e6, 1.0e6, 16),
+        ("POCSAG 1010 preamble", synth_gfsk(_pbits("10" * 64), 64e3, 1200, 4.5e3), 64e3, 10.2e3, 107)]:
+    r = detect_repetition(_noisy(wave, 10.0, 3000.0, fsx), fsx, bw_hint=bwx)
+    if r:
+        print(f"    {nm:24s} {r['period']:7d} {tt:6d} {r['rho']:7.3f} "
+              f"{r['cfo_hz']:9.0f} {r['cfo_ambiguity_hz']/2:10.0f}")
+    else:
+        print(f"    {nm:24s}  no detection")
+
+print("\n(c) false alarms on NON-repeating signals")
+fa = tot = 0
+for _ in range(8):
+    for nm, wave, fsx, bwx in [
+            ("random GFSK payload",
+             synth_gfsk(_rg.integers(0, 2, 400).astype(np.int8), 2e6, 250e3, 60e3), 2e6, 370e3),
+            ("complex noise",
+             (_rg.standard_normal(4000) + 1j * _rg.standard_normal(4000)).astype(np.complex64),
+             2e6, 1.0e6)]:
+        tot += 1
+        if detect_repetition(_noisy(wave, 20.0, 1000.0, fsx), fsx, bw_hint=bwx):
+            fa += 1
+print(f"    {fa} detections in {tot} non-repeating cases")
+
+print("\n(d) the Zigbee case: repetition WITHOUT the sequence constant")
+for label, seed in (("arbitrary sequence A", 5), ("different sequence B", 99)):
+    g = np.random.default_rng(seed)
+    chips = g.integers(0, 2, 32) * 2 - 1
+    pre8 = np.tile(np.repeat(chips, 4), 8).astype(np.complex64)
+    pay = np.repeat(g.integers(0, 2, 64) * 2 - 1, 4).astype(np.complex64)
+    r = detect_repetition(_noisy(np.concatenate([pre8, pay]), 6.0, 40e3, 4e6),
+                          4e6, bw_hint=2.0e6, max_period=300)
+    print(f"    {label:22s} period {r['period'] if r else None} (true 128)"
+          f"  rho={r['rho']:.3f}" if r else f"    {label:22s} none")
+print("    -> identical for both, so the 32-chip constant I did not trust (§24)")
+print("       is never needed to detect that a preamble is present.")
+
+print("\n(e) where the three tiers sit")
+for nm, fl, needs in (("blind features", "+20.0 dB", "nothing"),
+                      ("autocorrelation (rho_floor=0.30)", " -3.7 dB", "repeat period only"),
+                      ("autocorrelation (rho_floor=0)", "-10.6 dB", "period; false-alarm prone"),
+                      ("matched filter", "-22.5 dB", "exact waveform + CFO grid")):
+    print(f"    {nm:34s} {fl:>9}   requires: {needs}")
+""")
+
+md(r"""
 # Part III — Classification
 
-## 14. Assembling the feature vector
+## 15. Assembling the feature vector
 
 `extract_features` runs the whole measurement chain on one burst. Two ordering
 decisions in it are load-bearing:
@@ -949,7 +1107,7 @@ decisions in it are load-bearing:
 code(S(PID, "Features", "extract_features"))
 
 md(r"""
-## 15. Deciding the modulation family
+## 16. Deciding the modulation family
 
 An ordered decision list rather than a trained classifier — each test is
 something we derived, so a wrong answer is traceable to a specific measurement.
@@ -961,7 +1119,7 @@ distinguish them.
 code(S(PID, "_decide_modclass"))
 
 md(r"""
-## 16. The protocol database
+## 17. The protocol database
 
 Roughly 35 entries, each with the bandwidth, symbol rate, burst duration,
 subcarrier spacing, and deviation ranges its standard permits — plus the
@@ -977,7 +1135,7 @@ in allocation and vocoder.
 code(S(PID, "MHz", "kHz", "PROTOCOLS"))
 
 md(r"""
-## 17. Scoring
+## 18. Scoring
 
 ### Per-feature range score
 
@@ -1020,7 +1178,7 @@ code(S(PID, "_hz", "format_report", "to_json"))
 md(r"""
 # Part IV — Validating the blind path
 
-## 18. Eight synthetic protocols, over many noise realisations
+## 19. Eight synthetic protocols, over many noise realisations
 
 Ground truth for both the modulation family and the protocol name.
 
@@ -1055,7 +1213,7 @@ concealed:
    implies. The test was measuring the generator, not the detector.
 
 Current result: **94/96** across 12 seeds. The residual failures are the ADS-B
-case being classified as a Mode A/C/S reply on 2 of 12 seeds — see §26.
+case being classified as a Mode A/C/S reply on 2 of 12 seeds — see §28.
 """)
 
 code(S(TPI, "cases"))
@@ -1109,7 +1267,7 @@ RNG = np.random.default_rng(0xC0FFEE)
 """)
 
 md(r"""
-## 19. Segmentation, and the blind SNR floor
+## 20. Segmentation, and the blind SNR floor
 
 The SNR sweep is the motivation for Part V. Classification is solid at 20–30 dB,
 degrades through 15, and by 6 dB the modulation family is wrong. At 0 dB the
@@ -1128,7 +1286,7 @@ code("extra_checks()")
 md(r"""
 # Part V — The preamble matched filter
 
-## 20. Why the floor exists
+## 21. Why the floor exists
 
 The 20 dB floor is structural. Every feature in Part II is a **second-order
 statistic** — a bandwidth, an envelope variance, a histogram of a
@@ -1148,7 +1306,7 @@ publicly documented preamble and sync word.
 """)
 
 md(r"""
-## 21. Detection theory
+## 22. Detection theory
 
 Correlate against a reference $r$ of $N$ samples, normalised so the statistic is
 scale-free:
@@ -1178,7 +1336,7 @@ $$\boxed{\;\mathbb{E}[\rho] \;\approx\; \sqrt{\frac{\gamma}{1+\gamma}}\;} \tag{2
 **Note what (2) does not contain: $N$.** The peak correlation is set purely by
 SNR and saturates at 1. Longer templates do not raise the peak — all of their
 benefit lives in (1), in the threshold we are permitted to use. This is a
-genuinely counter-intuitive point and §25 verifies it directly across a 21×
+genuinely counter-intuitive point and §26 verifies it directly across a 21×
 range of template lengths.
 
 ### Threshold and floor
@@ -1210,7 +1368,7 @@ with a very long preamble.
 code(S(PRE, "threshold_for_pfa", "snr_floor_db"))
 
 md(r"""
-## 22. Reference waveform synthesis and the template bank
+## 23. Reference waveform synthesis and the template bank
 
 All synthesis supports **fractional** samples-per-symbol, because the capture
 rate is whatever the SDR provided and is rarely an integer multiple of the
@@ -1272,7 +1430,7 @@ print(f"match: {rebuilt == _BLE_AA}")
 """)
 
 md(r"""
-## 23. The correlator, and a nearly free frequency search
+## 24. The correlator, and a nearly free frequency search
 
 ### Carrier offset is the main fragility
 
@@ -1302,14 +1460,14 @@ correlation.
 
 The shift direction is easy to get backwards — an earlier version used
 `roll(H, -k)` and reported every offset with inverted sign while detecting
-perfectly, since a symmetric grid hides the error in the peak. §25 checks the
+perfectly, since a symmetric grid hides the error in the peak. §26 checks the
 sign against injected offsets for exactly this reason.
 """)
 
 code(S(PRE, "_next_fast_len", "normalized_correlate", "_cfo_grid"))
 
 md(r"""
-## 24. The bank, and template cross-talk
+## 25. The bank, and template cross-talk
 
 ### A limit of equation (1)
 
@@ -1363,7 +1521,7 @@ code(S(PRE, "PreambleBank"))
 
 # ---------------------------------------------------------------------------
 md(r"""
-## 25. Validation
+## 26. Validation
 
 Four checks, then the headline measurement.
 """)
@@ -1524,9 +1682,79 @@ code("_ = test_end_to_end()")
 
 # ---------------------------------------------------------------------------
 md(r"""
+## 27. Stage 3: feeding template parameters back
+
+A natural question is whether the correlator should run *first*, before feature
+extraction. Measurement says no — but a related restructuring does help.
+
+### Why not reorder
+
+The bank is **3–15× more expensive than the entire blind path** (15.7 ms vs
+190.6 ms for SiK at 2 Msps; 8.8 vs 27.0 for BLE), dominated by the frequency
+grid. Only 6 of ~35 database entries have templates, so correlator-first means
+paying the expensive stage, getting nothing, and running the cheap one anyway.
+
+The obvious repair — prune templates using measured bandwidth — fails exactly
+where the correlator matters. Measured $B_{99}$ against a true 370 kHz: 310 kHz
+at +20 dB, **1767 kHz** at +10 dB, and pegged at the capture width below
+&minus;6 dB where no burst is detected at all. Any blind measurement used to
+constrain the correlator inherits the blind floor and reintroduces it — the same
+lesson as the consistency gate in §26.
+
+### What does help: feedback, not reordering
+
+Run the bank second as now, then **re-measure using the hit's parameters**. A
+confirmed hit knows the symbol rate exactly, and that is precisely the input the
+fragile parts of §13 depend on:
+
+| DMR 4-FSK | Blind $R_s$ | Blind tones | Informed tones |
+|---|---|---|---|
+| +25 dB | 4.8k ✓ | 6/6 | 6/6 |
+| **+15 dB** | **1.7k ✗** | **2/6** | **6/6** |
+| +10 dB | 3.2k ✗ | 0/6 | 0/6 |
+
+At 15 dB the blind estimator lands on 1.7 kHz against a true 4800 and tone
+counting fails 4 trials in 6; handed the exact rate it is 6/6. It is cheap
+because it *replaces* the estimator rather than adding to it.
+
+Note the honest limits: nothing below 10 dB, where the discriminator threshold
+effect of §9 dominates and no amount of timing knowledge helps, and nothing for
+SiK 2-FSK, which was never $R_s$-limited. A narrow band of improvement.
+
+### It also exposed a ranking bug
+
+Stage 3 propagates the hit's parameters, so a *wrong* hit now does visible
+damage. On a SiK capture at &minus;9 dB, a 2728-sample LoRa template produced a
+hit at margin **1.00×** that outranked the correct SiK match, and Stage 3 duly
+re-measured with LoRa's symbol rate.
+
+Raising `min_margin` to 1.20 fixed the ranking but cost the short SiK template
+6 dB (&minus;6 → 0 dB). Margin is the wrong lever: $t \propto 1/\sqrt{N}$, so a
+long template earns a large margin from a marginal correlation, and margins are
+not comparable across templates. **Implied SNR is** — equation (2) estimates the
+same physical quantity whatever the template length, and cross-talk always
+implies far less signal than is actually present. Ranking by implied SNR restored
+SiK to &minus;6 dB and fixed the ordering.
+""")
+
+code(r"""
+# Stage 3 in action: the same capture, before and after re-measurement
+bank3 = PreambleBank(p_fa=1e-6)
+tpl3 = sik_preamble(250e3, 60e3)
+iq3 = frame_gfsk(tpl3, 2e6, 600, -6.0, 1e-3, cfo_hz=4.2e3)
+for r in identify(iq3, 2e6, rf_center_hz=915e6, top=1, preamble_bank=bank3):
+    if r.preamble is None:
+        continue
+    print(r.preamble)
+    print(f"  symbol rate used : {r.features.symbol_rate/1e3:.1f} kHz")
+    for n in r.features.notes:
+        print(f"  · {n}")
+""")
+
+md(r"""
 # Part VI
 
-## 26. Limitations
+## 28. Limitations
 
 Honest accounting of what this does not do.
 
@@ -1534,7 +1762,7 @@ Honest accounting of what this does not do.
 Every specification constant here — the BLE access address and its bit order,
 the ADS-B pulse positions, the Si4432 sync word, the protocol database's
 bandwidth and rate ranges — comes from memory of the standards rather than from
-the documents. §22 explains why the Zigbee chip sequence was omitted rather than
+the documents. §23 explains why the Zigbee chip sequence was omitted rather than
 guessed, and the same skepticism should be applied to everything else before
 trusting a real capture. Self-consistent tests **cannot** catch a wrong constant.
 
@@ -1556,8 +1784,19 @@ trusting a real capture. Self-consistent tests **cannot** catch a wrong constant
   differing essentially in frame length; when the run-length chip-rate estimate
   wanders, duration alone is not always enough.
 
+### The repetition tier
+- **Period is recovered only up to a multiple.** Any integer multiple of the
+  fundamental is genuinely a period; picking the fundamental is a separate and
+  harder problem, and the chained walk does not always reach it.
+- **The CFO estimate aliases** at $f_s/\tau$, so it cannot by itself collapse the
+  matched filter's grid.
+- **The $\rho$ floor costs ~7 dB** of the statistically available sensitivity.
+  It is a parameter; lowering it trades false alarms on structured payload.
+- **Non-repeating preambles are invisible to it.** A protocol whose sync word is
+  a one-shot pseudorandom sequence has no periodicity to find.
+
 ### Methodology
-- **Single-seed test results are not measurements.** §18 documents four defects
+- **Single-seed test results are not measurements.** §19 documents four defects
   that a fixed seed concealed, including one that made six of eight cases return
   silently empty results. Any pass rate quoted here without a seed count should
   be distrusted, including the Part V floors — those used 10 trials per SNR
@@ -1571,7 +1810,7 @@ trusting a real capture. Self-consistent tests **cannot** catch a wrong constant
 - **Only covers protocols with fixed preambles.** Anything negotiated
   (Bluetooth Classic access codes derive from the piconet LAP) needs the
   parameter before a template can be built.
-- **Concurrent overlapping signals:** NMS keeps the stronger one (§24).
+- **Concurrent overlapping signals:** NMS keeps the stronger one (§25).
 - **Cross-talk is bounded empirically, not analytically.** Equation (1) covers
   noise; the mutual coherence between templates is not characterised, and adding
   templates raises cross-talk in a way this suite does not measure.
