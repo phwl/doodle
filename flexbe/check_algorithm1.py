@@ -36,6 +36,7 @@ within-cycle index vector I^i[1..2P_bu-1] are meant to be enumerated.
 """
 
 import itertools
+import math
 
 import numpy as np
 
@@ -142,8 +143,51 @@ def main():
                 print(f"  N={1<<n:6d} P_bu={P_bu:3d}  {label}  "
                       f"rotate by k+{rot}:  {tag}")
 
-    print("\nThe control law of lines 7-11 is reproduced exactly by the "
-          "simulator; see\ntest_flexbe.TestSchedule.test_control_matches_algorithm1.")
+    print("\n" + "=" * 78)
+    print("(c) the proposed repair of lines 5-6 (see docs/algorithm1_fix.md)")
+    print("=" * 78)
+    print("""  h <- n-1-k
+  if h < m:   H <- j;                    I^i[2t] <- (H << m) + ins(t, h);  S^i <- h
+  else:       e <- j mod 2                                                        
+              H <- ins(j >> 1, h-m);     I^i[2t] <- (H << m) + 2t + e;     S^i <- 0
+  both:       I^i[2t+1] <- I^i[2t] + 2^h;  R^i <- bsm(I^i[0])      (lines 7-11 unchanged)
+""")
+    for n, P_bu in [(3, 1), (4, 2), (6, 2), (6, 4), (9, 4), (10, 16), (12, 16)]:
+        m = (2 * P_bu).bit_length() - 1
+        if n < m:
+            continue
+        N, P = 1 << n, 1 << m
+        conflict_free = complete = pairing = law = True
+        for k in range(n):
+            h, seen = n - 1 - k, np.zeros(N, dtype=bool)
+            want_S = (n - k - 1) if (n - m) <= k <= (n - 2) else 0
+            for j in range(N // P):
+                c = fx.algorithm1_fixed(n, P_bu, k, j)
+                banks = fx.bsm_array(c.indices, m)
+                conflict_free &= len(np.unique(banks)) == P
+                complete &= not seen[c.indices].any()
+                seen[c.indices] = True
+                pairing &= bool(np.all(c.indices[1::2] - c.indices[0::2] == (1 << h)))
+                law &= (c.R == fx.bsm(int(c.indices[0]), m)) and (c.S == want_S)
+            complete &= seen.all()
+        print(f"  N={N:6d} P_bu={P_bu:3d}:  conflict-free={conflict_free}  "
+              f"complete={complete}  pairing={pairing}  lines-7-11={law}")
+
+    print("\nend-to-end: an engine driven only by the repaired listing")
+    for N, P_bu in [(256, 4), (4096, 16)]:
+        n = int(math.log2(N))
+        eng = fx.FlexBE(P_bu)
+        eng._sched[(n, 1)] = fx.ButterflySchedule.from_algorithm1_fixed(
+            n, P_bu, validate=True)
+        rng = np.random.default_rng(N)
+        x = rng.normal(size=N) + 1j * rng.normal(size=N)
+        y, st = eng.transform(x, bitrev=True, datapath="cycle")
+        err = np.max(np.abs(y[0] - np.fft.fft(x))) / np.max(np.abs(np.fft.fft(x)))
+        print(f"  N={N:6d} P_bu={P_bu:3d}: {st.butterfly_cycles:6d} butterfly cycles, "
+              f"max relative error vs numpy.fft = {err:.2e}")
+
+    print("\nThe control law of lines 7-11 is reproduced exactly; see "
+          "test_flexbe.TestAlgorithm1Fix.")
 
 
 if __name__ == "__main__":

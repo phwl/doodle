@@ -67,6 +67,7 @@ __all__ = [
     "fft_coefficients", "random_bl_coefficients", "expand_coefficients",
     "coefficients_from_paper_layout", "butterfly_reference",
     "TransformStats", "FlexBE", "BEArray",
+    "algorithm1_fixed", "algorithm1_fixed_schedule",
     "bitrev_schedule", "cycles_eq10", "interconnect_cost",
 ]
 
@@ -908,3 +909,98 @@ def layer_cycles(n_seq: int, l: int, P_be: int, P_bu: int) -> float:
 def bitrev_cycles(n_seq: int, N: int, P_be: int, P_bu: int) -> float:
     """Bit-reversal write-back: exactly N/P cycles per sequence (Sec. 3.3)."""
     return n_seq * N / (2 * P_bu) / P_be
+
+
+# ---------------------------------------------------------------------------
+# proposed repair of Algorithm 1, lines 5-6
+# ---------------------------------------------------------------------------
+
+def algorithm1_fixed(n: int, P_bu: int, k: int, j: int) -> CycleControl:
+    """Closed-form, conflict-free replacement for Algorithm 1 lines 5-6.
+
+    Stage k pairs indices differing in bit h = n-1-k (decimation in frequency).
+    With ins(x, p) = ((x >> p) << (p+1)) | (x mod 2**p)  (insert a 0 bit at
+    position p) the index vector of cycle j of stage k is
+
+        h < m   (both operands in RAM row H):
+            H = j
+            I^i[2t]   = (H << m) + ins(t, h)          t = 0 .. P_bu-1
+            S^i       = h
+
+        h >= m  (operands in rows H and H + 2**(h-m)):
+            e = j mod 2,   H = ins(j >> 1, h - m)
+            I^i[2t]   = (H << m) + 2t + e
+            S^i       = 0
+
+        both:   I^i[2t+1] = I^i[2t] + 2**h
+                R^i       = bsm(I^i[0])               (Algorithm 1, line 7)
+
+    Lines 7-11 of the published listing are unchanged: R^i is still bsm(I^i[0])
+    and S^i still equals n-k-1 on (n-m) <= k <= (n-2) and 0 elsewhere.
+
+    Conflict freedom (see docs/algorithm1_fix.md for the two-line proof):
+      * h < m : one cycle reads the whole of row H, so the banks are
+        (popcount(H) + low) mod 2**m for low = 0..2**m-1, all distinct;
+      * h >= m: bit h-m of H is 0 by construction, hence
+        popcount(H + 2**(h-m)) = popcount(H) + 1 and the banks are
+        (popcount(H) + e + slot) mod 2**m, i.e. a pure rotation -- all distinct.
+    """
+    m = (2 * P_bu).bit_length() - 1
+    P = 1 << m
+    assert 0 <= k < n and 0 <= j < (1 << (n - m))
+    h = n - 1 - k
+    t = np.arange(P // 2, dtype=np.int64)
+    I = np.empty(P, dtype=np.int64)
+
+    if h < m:                                   # pair inside one row
+        H = j
+        I[0::2] = (H << m) + (((t >> h) << (h + 1)) | (t & ((1 << h) - 1)))
+        S = h
+    else:                                       # pair spans two rows
+        e = j & 1
+        step = 1 << (h - m)
+        r = j >> 1
+        H = ((r >> (h - m)) << (h - m + 1)) | (r & (step - 1))
+        I[0::2] = (H << m) + 2 * t + e
+        I[1::2] = ((H + step) << m) + 2 * t + e
+        S = 0
+    I[1::2] = I[0::2] + (1 << h)
+    R = bsm(int(I[0]), m)
+
+    banks = bsm_array(I, m)
+    dbb = np.empty(P, dtype=np.int64)
+    dbb[banks] = I >> m
+    a = I[0::2]
+    cidx = ((a >> (h + 1)) << h) | (a & ((1 << h) - 1))
+    return CycleControl(k, h, int(R), int(S), I, dbb, cidx)
+
+
+def algorithm1_fixed_schedule(n: int, P_bu: int) -> List[CycleControl]:
+    """Every cycle of an N-point transform, emitted by algorithm1_fixed()."""
+    m = (2 * P_bu).bit_length() - 1
+    return [algorithm1_fixed(n, P_bu, k, j)
+            for k in range(n) for j in range(1 << (n - m))]
+
+
+def _schedule_from_algorithm1_fixed(n: int, P_bu: int,
+                                    validate: bool = False) -> ButterflySchedule:
+    """A ButterflySchedule whose control comes only from algorithm1_fixed().
+
+    Used to show that the repaired listing is self-contained: an engine driven
+    purely by it computes a correct FFT with no bank conflicts.
+    """
+    m = (2 * P_bu).bit_length() - 1
+    sch = ButterflySchedule.__new__(ButterflySchedule)
+    sch.n, sch.m = n, m
+    sch.N, sch.P = 1 << n, 1 << m
+    sch.s, sch.P_sub = 0, 1
+    sch.n_stages = n
+    sch.cycles_per_stage = sch.N // sch.P
+    sch.stages = [[algorithm1_fixed(n, P_bu, k, j)
+                   for j in range(sch.cycles_per_stage)] for k in range(n)]
+    if validate:
+        sch.validate()
+    return sch
+
+
+ButterflySchedule.from_algorithm1_fixed = staticmethod(_schedule_from_algorithm1_fixed)

@@ -12,9 +12,10 @@ and reports cycle counts that can be compared against Eq. (10) and the RTL.
 ```
 flexbe.py             engine: memory, switches, schedule, bit reversal, arithmetic
 bspnet.py             application: Eq. (1) features, BL branches, Table 7 configs
-test_flexbe.py        33 unit tests (the "test program")
+test_flexbe.py        39 unit tests (the "test program")
 demo_flexbe.py        report reproducing the paper's headline numbers
-check_algorithm1.py   consistency analysis of Algorithm 1 (see note below)
+check_algorithm1.py   diagnosis of Algorithm 1 lines 5-6 + verification of the fix
+docs/                 algorithm1_fix.md (proof), algorithm1_fixed.tex (listing)
 ```
 
 ## Quick start
@@ -90,7 +91,8 @@ which is *identical* to Algorithm 1 lines 8–11 (`S^i = n-k-1` for
 * every cycle of every stage is bank-conflict free, each stage covers each
   element exactly once, and the PRS pair `(R^i, S^i)` reproduces the FCS
   crossbar `P_f` cycle by cycle (`TestSchedule`);
-* the subset switch uses at most `m` distinct states;
+* the subset switch uses at most `m` distinct states, and `algorithm1_fixed`
+  reproduces the validated schedule cycle for cycle (`TestAlgorithm1Fix`);
 * exact FFT/IFFT against `numpy.fft` for `N` = 32…4096 and `P_bu` = 2…16, with
   and without the bit-reversal write-back, and with `P_N` sequences packed into
   one RAM array;
@@ -111,35 +113,60 @@ which is *identical* to Algorithm 1 lines 8–11 (`S^i = n-k-1` for
 `demo_flexbe.py` prints all of the above as a report, including the module
 breakdown for cfg-6 and the FCS/PRS cost table.
 
-## Note on Algorithm 1, lines 5–6
+## Algorithm 1, lines 5–6: diagnosis and fix
 
 The control law in lines 7–11 is exactly what a conflict-free shift-down
-schedule needs, and the simulator reproduces it. The index formula in lines 5–6,
+schedule needs. The index formula in lines 5–6,
 
 ```
 ii     <- rotate_{n-1}(base, k+1)
 I^i[0] <- rotate_n(2*ii, k)
 ```
 
-read literally, does **not** appear to select one representative per
-conflict-free cycle. `check_algorithm1.py` tries both rotation amounts (`k+1`
-as printed and `k`) and both stage orders (`h = n-1-k` and `h = k`), and:
+read literally, does **not** select one representative per conflict-free cycle.
+`check_algorithm1.py` tries both rotation amounts (`k+1` as printed and `k`) and
+both stage orders (`h = n-1-k` and `h = k`), and:
 
-* against the simulator's schedule it fails at the first stage in every size
-  tested (`N` = 8…4096, `P_bu` = 2…16);
+* against a validated schedule it fails at the first stage in every size tested
+  (`N` = 8…4096, `P_bu` = 2…16);
 * for `N` = 8, 16, 32 with `P_bu` = 2 it enumerates *all* conflict-free
-  groupings of a stage and finds that none of them admits the `I^i[0]` values as
-  distinct cycle representatives — e.g. for `N` = 8 the only conflict-free
-  grouping is row-based `{0,1,2,3} / {4,5,6,7}`, while the formula yields
-  representatives `0` and `2`, which share a row.
+  groupings of a stage and finds that none admits the `I^i[0]` values as
+  distinct cycle representatives — for `N` = 8 the only conflict-free grouping
+  is row-based `{0,1,2,3} / {4,5,6,7}`, while the formula yields representatives
+  `0` and `2`, which share a row.
 
-Since the released generator presumably emits a working sequence, the likely
-explanation is a transcription slip in the listing (in lines 5–6, in how `base`
-advances, or in how the remaining entries `I^i[1..2P_bu-1]` are enumerated),
-rather than an error in the hardware — but it is worth a look before
-resubmission, since a reader reimplementing from the listing would not get a
-conflict-free schedule. The simulator instead derives the schedule from the
-conflict-freedom requirement itself and matches lines 7–11 exactly.
+Rewriting the printed expression as `ins(rotate_{n-1}(base, 2k+1), k)` (where
+`ins` inserts a zero bit) suggests the origin: the operand is rotated twice by
+roughly the stage index, and the hole lands at bit `k` instead of `n-1-k`.
+
+**The fix.** Only lines 5–6 change; lines 7–11 stay verbatim. With
+`ins(x,p) = ((x >> p) << (p+1)) | (x mod 2^p)`:
+
+```
+h <- n-1-k
+if h < m:  H <- j                      I^i[2t] <- (H << m) + ins(t, h)     S^i <- h
+else:      e <- j mod 2
+           H <- ins(j >> 1, h-m)       I^i[2t] <- (H << m) + 2t + e        S^i <- 0
+both:      I^i[2t+1] <- I^i[2t] + 2^h  R^i <- bsm(I^i[0])
+```
+
+`S^i = h` for `h < m` is identical to the published `S^i = n-k-1` on
+`(n-m) <= k <= (n-2)`, and the revised listing additionally specifies the whole
+vector `I^i[0..2P_bu-1]`, which the published version delegates to "a specific
+circuit" of [11].
+
+It is conflict free by construction: for `h < m` a cycle reads a whole RAM row,
+whose banks `(popcount(H) + low) mod 2^m` are all distinct; for `h >= m` bit
+`h-m` of `H` is zero, so `popcount(H + 2^(h-m)) = popcount(H) + 1` and slot `j`
+reads bank `(popcount(H) + e + j) mod 2^m`, a pure rotation. Each branch emits
+exactly `N/(2*P_bu)` cycles per stage and covers every index once.
+
+`flexbe.algorithm1_fixed(n, P_bu, k, j)` is a direct transcription;
+`TestAlgorithm1Fix` verifies conflict freedom, coverage, pairing and lines 7–11
+straight from the formula for `N` = 8…4096, `P_bu` = 1…16, and runs an engine
+whose control comes *only* from the revised listing against `numpy.fft`.
+`docs/algorithm1_fix.md` has the full argument and a note on hardware cost;
+`docs/algorithm1_fixed.tex` is a drop-in `algorithm2e` listing.
 
 ## Extending
 

@@ -101,6 +101,21 @@ class TestSchedule(unittest.TestCase):
                     self.assertEqual(ctrl.S, expect)
                     self.assertEqual(ctrl.R, fx.bsm(int(ctrl.indices[0]), m))
 
+    def test_fixed_algorithm1_reproduces_the_schedule(self):
+        for n, P_bu in [(3, 1), (4, 2), (6, 4), (8, 4), (10, 16), (5, 16)]:
+            m = (2 * P_bu).bit_length() - 1
+            if n < m:
+                continue
+            with self.subTest(N=1 << n, P_bu=P_bu):
+                sched = fx.ButterflySchedule(n, m, validate=True)
+                for k, stage in enumerate(sched.stages):
+                    for j, c in enumerate(stage):
+                        f = fx.algorithm1_fixed(n, P_bu, k, j)
+                        self.assertTrue(np.array_equal(f.indices, c.indices))
+                        self.assertTrue(np.array_equal(f.depth_by_bank,
+                                                       c.depth_by_bank))
+                        self.assertEqual((f.R, f.S), (c.R, c.S))
+
     def test_subset_switch_uses_only_m_states(self):
         """Sec. 3.1: P_s takes only log2(2*P_bu) of the N/(2P_bu) possible P_f."""
         n, P_bu = 12, 16
@@ -109,6 +124,94 @@ class TestSchedule(unittest.TestCase):
         states = {c.S for c in sched.all_cycles()}
         self.assertLessEqual(len(states), m)
         self.assertTrue(states <= set(range(m)))
+
+
+# ---------------------------------------------------------------------------
+class TestAlgorithm1Fix(unittest.TestCase):
+    """The repaired lines 5-6, verified without reference to the schedule."""
+
+    CASES = [(3, 1), (4, 2), (6, 2), (6, 4), (9, 4), (10, 16), (12, 16), (5, 16)]
+
+    def _cases(self):
+        for n, P_bu in self.CASES:
+            if n >= (2 * P_bu).bit_length() - 1:
+                yield n, P_bu
+
+    def test_conflict_free_and_complete(self):
+        """Directly from the formula: distinct banks, exact coverage, valid pairs."""
+        for n, P_bu in self._cases():
+            m = (2 * P_bu).bit_length() - 1
+            N, P = 1 << n, 1 << m
+            with self.subTest(N=N, P_bu=P_bu):
+                for k in range(n):
+                    seen = np.zeros(N, dtype=bool)
+                    h = n - 1 - k
+                    for j in range(N // P):
+                        c = fx.algorithm1_fixed(n, P_bu, k, j)
+                        banks = fx.bsm_array(c.indices, m)
+                        self.assertEqual(len(np.unique(banks)), P,
+                                         "bank conflict")
+                        self.assertFalse(seen[c.indices].any(), "element reused")
+                        seen[c.indices] = True
+                        # correct butterfly pairing on the hole bit
+                        self.assertTrue(np.all(c.indices[1::2] - c.indices[0::2]
+                                               == (1 << h)))
+                        self.assertFalse(np.any((c.indices[0::2] >> h) & 1))
+                    self.assertTrue(seen.all(), "stage does not cover all N")
+
+    def test_lines_7_to_11_are_unchanged(self):
+        """R^i = bsm(I^i[0]) and S^i = n-k-1 on (n-m)..(n-2), else 0."""
+        for n, P_bu in self._cases():
+            m = (2 * P_bu).bit_length() - 1
+            for k in range(n):
+                expect_S = (n - k - 1) if (n - m) <= k <= (n - 2) else 0
+                for j in range(1 << (n - m)):
+                    c = fx.algorithm1_fixed(n, P_bu, k, j)
+                    self.assertEqual(c.R, fx.bsm(int(c.indices[0]), m))
+                    self.assertEqual(c.S, expect_S)
+
+    def test_prs_still_replaces_the_crossbar(self):
+        """P_f = P_s x P_r still holds for every cycle the formula emits."""
+        n, P_bu = 10, 16
+        m = (2 * P_bu).bit_length() - 1
+        prs = fx.PermuteRotateSwitch(m)
+        for k in range(n):
+            for j in range(1 << (n - m)):
+                c = fx.algorithm1_fixed(n, P_bu, k, j)
+                self.assertTrue(np.array_equal(prs.read_map(c.R, c.S),
+                                               fx.bsm_array(c.indices, m)))
+
+    def test_engine_driven_only_by_the_fixed_algorithm(self):
+        """An engine whose control comes solely from the repaired listing."""
+        for N, P_bu in [(64, 4), (1024, 16)]:
+            with self.subTest(N=N, P_bu=P_bu):
+                n = int(math.log2(N))
+                eng = fx.FlexBE(P_bu)
+                eng._sched[(n, 1)] = fx.ButterflySchedule.from_algorithm1_fixed(
+                    n, P_bu, validate=True)
+                rng = np.random.default_rng(N)
+                x = rng.normal(size=N) + 1j * rng.normal(size=N)
+                y, st = eng.transform(x, bitrev=True, datapath="cycle")
+                self.assertTrue(np.allclose(y[0], np.fft.fft(x)))
+                self.assertEqual(st.butterfly_cycles, N // (2 * P_bu) * n)
+
+    def test_published_formula_is_not_conflict_free(self):
+        """Regression guard for the diagnosis: lines 5-6 as printed do fail."""
+        def published_I0(n, P_bu, k, j, rot=1):
+            return fx.rotl(2 * fx.rotl(j * P_bu, k + rot, n - 1), k, n)
+
+        n, P_bu = 10, 16
+        m = (2 * P_bu).bit_length() - 1
+        sched = fx.ButterflySchedule(n, m)
+        gid = np.zeros(1 << n, dtype=int)
+        for g, c in enumerate(sched.stages[0]):
+            gid[c.indices] = g
+        reps = [published_I0(n, P_bu, 0, j) for j in range(1 << (n - m))]
+        self.assertNotEqual(sorted(gid[reps]), list(range(len(sched.stages[0]))))
+        # while the repaired formula does select one representative per cycle
+        fixed = [int(fx.algorithm1_fixed(n, P_bu, 0, j).indices[0])
+                 for j in range(1 << (n - m))]
+        self.assertEqual(sorted(gid[fixed]), list(range(len(sched.stages[0]))))
 
 
 # ---------------------------------------------------------------------------
