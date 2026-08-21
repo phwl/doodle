@@ -72,18 +72,13 @@ class HWConfig:
     P_be: int = 4
     P_bu: int = 16
     f_mhz: float = 300.0
-    zero_pad_short: bool = False   # True models BE-base: no sub-parallelism
 
 
 HW = {
-    # BE-base-1: P_bu = 4 inherited from FABNet, P_be = 16 (same 64 BUs)
-    "BE-base-1": HWConfig("BE-base-1", P_be=16, P_bu=4,  f_mhz=210.0, zero_pad_short=True),
-    # BE-base-2: P_bu = 16, short transforms must be zero padded to 2*P_bu
-    "BE-base-2": HWConfig("BE-base-2", P_be=4,  P_bu=16, f_mhz=115.0, zero_pad_short=True),
-    # FlexBE: same BU count as BE-base-2 but with P_sub / P_N support
-    "FlexBE":    HWConfig("FlexBE",    P_be=4,  P_bu=16, f_mhz=310.0, zero_pad_short=False),
+    # standalone engine array, F_max from Table 10
+    "FlexBE":   HWConfig("FlexBE",   P_be=4, P_bu=16, f_mhz=310.0),
     # the integrated BSP-Flex system runs at 300 MHz (Table 11)
-    "BSP-Flex":  HWConfig("BSP-Flex",  P_be=4,  P_bu=16, f_mhz=300.0, zero_pad_short=False),
+    "BSP-Flex": HWConfig("BSP-Flex", P_be=4, P_bu=16, f_mhz=300.0),
 }
 
 
@@ -94,13 +89,9 @@ HW = {
 def _bl_cycles(n_seq: int, l: int, hw: HWConfig) -> float:
     """Cycles for n_seq BL/FFT transforms of length l on this engine array.
 
-    A BE-base style engine cannot process l < 2*P_bu, so the vectors are zero
-    padded to 2*P_bu (limitation 1 of Sec. 3) -- that is what zero_pad_short
-    models.  FlexBE instead folds 2*P_bu/l transforms into one datapath pass.
+    Transforms shorter than 2*P_bu are folded 2*P_bu/l at a time by
+    sub-parallelism rather than zero padded (Sec. 3.2).
     """
-    P = 2 * hw.P_bu
-    if hw.zero_pad_short and l < P:
-        return layer_cycles(n_seq, P, hw.P_be, hw.P_bu)
     return layer_cycles(n_seq, l, hw.P_be, hw.P_bu)
 
 
@@ -264,7 +255,7 @@ class BSPNet:
 # reporting helpers
 # ---------------------------------------------------------------------------
 
-def design_space_table(hw_names=("BE-base-1", "BE-base-2", "FlexBE")) -> str:
+def design_space_table(hw_names=("FlexBE", "BSP-Flex")) -> str:
     head = f"{'config':8s} {'d_in':>5s} {'d_m':>4s} {'L':>5s} {'blk':>4s} {'brev':>5s}"
     for h in hw_names:
         head += f" | {h + ' cyc':>16s} {'ms':>7s}"

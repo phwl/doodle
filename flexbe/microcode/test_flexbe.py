@@ -8,9 +8,7 @@ The tests check architectural claims, not just numerics:
 
   * the shift-down mapping is bank-conflict free for every cycle of every
     stage, each stage covers every element once, and the PRS reproduces the
-    FCS crossbar cycle by cycle;
-  * the repaired Algorithm 1 satisfies all of that straight from its closed
-    form, and reproduces the published control law of lines 7-11;
+    P_f permutation cycle by cycle, straight from the closed-form control;
   * the datapath computes exact FFTs, IFFTs and butterfly-linear layers;
   * Algorithm 3 is a correct bit reversal, conflict free on both memories, in
     exactly N/P cycles;
@@ -67,8 +65,8 @@ class TestBitHelpers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-class TestAlgorithm1(unittest.TestCase):
-    """The repaired listing, verified from its closed form."""
+class TestCycleControl(unittest.TestCase):
+    """The per-cycle control, verified from its closed form."""
 
     CASES = [(3, 1), (4, 2), (6, 2), (6, 4), (9, 4), (10, 16), (12, 16), (5, 16)]
 
@@ -85,7 +83,7 @@ class TestAlgorithm1(unittest.TestCase):
                 for k in range(n):
                     h, seen = n - 1 - k, np.zeros(N, dtype=bool)
                     for j in range(N // P):
-                        c = fx.algorithm1(n, P_bu, k, j)
+                        c = fx.cycle_control(n, P_bu, k, j)
                         banks = fx.bsm_array(c.indices, m)
                         self.assertEqual(len(np.unique(banks)), P, "conflict")
                         self.assertFalse(seen[c.indices].any(), "reuse")
@@ -95,33 +93,31 @@ class TestAlgorithm1(unittest.TestCase):
                         self.assertFalse(np.any((c.indices[0::2] >> h) & 1))
                     self.assertTrue(seen.all(), "incomplete coverage")
 
-    def test_published_lines_7_to_11(self):
-        """R = bsm(I[0]); S = n-k-1 on (n-m)..(n-2), else 0."""
+    def test_control_law(self):
+        """R = bsm(I[0]) and S = h when h < m, else 0."""
         for n, P_bu in self._cases():
             m = (2 * P_bu).bit_length() - 1
             for k in range(n):
-                want = (n - k - 1) if (n - m) <= k <= (n - 2) else 0
+                h = n - 1 - k
                 for j in range(1 << (n - m)):
-                    c = fx.algorithm1(n, P_bu, k, j)
+                    c = fx.cycle_control(n, P_bu, k, j)
                     self.assertEqual(c.R, fx.bsm(int(c.indices[0]), m))
-                    self.assertEqual(c.S, want)
+                    self.assertEqual(c.S, h if h < m else 0)
 
-    def test_prs_replaces_the_crossbar(self):
-        """P_f = P_s x P_r for every cycle the formula emits."""
+    def test_prs_realises_the_permutation(self):
+        """P_f = P_s x P_r for every cycle the control emits."""
         n, P_bu = 10, 16
         m = (2 * P_bu).bit_length() - 1
         prs = fx.PermuteRotateSwitch(m)
         rng = np.random.default_rng(0)
         for k in range(n):
             for j in range(1 << (n - m)):
-                c = fx.algorithm1(n, P_bu, k, j)
+                c = fx.cycle_control(n, P_bu, k, j)
                 banks = fx.bsm_array(c.indices, m)
                 self.assertTrue(np.array_equal(prs.read_map(c.R, c.S), banks))
                 D = rng.normal(size=1 << m) + 1j * rng.normal(size=1 << m)
-                Pf = fx.fcs_matrix(c.indices, m)
-                self.assertTrue(np.allclose(prs.forward(D, c.R, c.S),
-                                            D[np.argmax(Pf, axis=1)]))
                 X = prs.forward(D, c.R, c.S)
+                self.assertTrue(np.allclose(X, D[banks]))
                 self.assertTrue(np.allclose(prs.inverse(X, c.R, c.S), D))
 
     def test_subset_switch_uses_at_most_m_states(self):
@@ -138,9 +134,9 @@ class TestAlgorithm1(unittest.TestCase):
 
     def test_out_of_range_is_rejected(self):
         with self.assertRaises(ValueError):
-            fx.algorithm1(10, 16, 10, 0)
+            fx.cycle_control(10, 16, 10, 0)
         with self.assertRaises(ValueError):
-            fx.algorithm1(10, 16, 0, 32)
+            fx.cycle_control(10, 16, 0, 32)
 
 
 # ---------------------------------------------------------------------------
@@ -353,18 +349,15 @@ class TestPerformanceModel(unittest.TestCase):
         self.assertTrue(np.allclose(y, np.fft.fft(x, axis=1)[:,
                                                              fx.bit_rev_array(15)]))
 
-    def test_prs_cheaper_than_fcs(self):
-        prev = 0.0
+    def test_prs_cost_scales_as_m_times_P(self):
+        """Sec. 3.1: the switching cost is Theta(m * P_bu), not quadratic."""
         for P_bu in (4, 8, 16, 32, 64):
-            c = fx.interconnect_cost(P_bu)
-            self.assertLess(c["prs_mux2"], c["fcs_mux2"])
-            self.assertGreater(c["ratio"], prev)
-            prev = c["ratio"]
-        self.assertGreaterEqual(fx.interconnect_cost(2)["prs_mux2"],
-                                fx.interconnect_cost(2)["fcs_mux2"])
-        c8, c64 = fx.interconnect_cost(8), fx.interconnect_cost(64)
-        self.assertGreater(c64["fcs_mux2"] / c8["fcs_mux2"], 60.0)
-        self.assertLess(c64["prs_mux2"] / c8["prs_mux2"], 16.0)
+            c = fx.prs_cost(P_bu)
+            self.assertAlmostEqual(c["mux2"],
+                                   c["m"] * c["ports"]
+                                   + (c["m"] + 1) * c["ports"] // 2, delta=1)
+        c8, c64 = fx.prs_cost(8), fx.prs_cost(64)
+        self.assertLess(c64["mux2"] / c8["mux2"], 16.0)      # 8x ports, not 64x
 
 
 # ---------------------------------------------------------------------------
@@ -397,13 +390,6 @@ class TestBSPNet(unittest.TestCase):
         self.assertGreater(lat, 0.05)
         self.assertLess(lat, 0.5)
         self.assertGreater(bs.throughput_sps(cfg, bs.HW["BSP-Flex"]), 2000)
-
-    def test_flexbe_beats_be_base_everywhere(self):
-        for name, cfg in bs.CONFIGS.items():
-            with self.subTest(cfg=name):
-                flex = bs.latency_ms(cfg, bs.HW["FlexBE"])
-                for base in ("BE-base-1", "BE-base-2"):
-                    self.assertLess(flex, bs.latency_ms(cfg, bs.HW[base]))
 
     def test_fft_layer_is_the_headline_number(self):
         items = dict(bs.cycle_breakdown(bs.CONFIGS["cfg-6"], bs.HW["FlexBE"]))

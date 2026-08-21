@@ -14,7 +14,6 @@ can be checked rather than assumed:
   Eq. (3)   shift-down storage   a_x = I >> m,  a_y = bsm(I)
   Eq. (2)   read / permute / butterfly / restore / write
   Sec. 3.1  PRS = barrel shifter (R) + subset switch (S), P_f = P_s x P_r
-  Alg. 1    per-cycle index vectors and PRS control  (repaired, see below)
   Sec. 3.2  sub-parallelism P_sub for l < 2*P_bu, Eq. (5) interleaving
   Sec. 3.3  integrated bit-reversal write-back, Alg. 3, in exactly N/P cycles
   Sec. 3.4  P_N packing of several sequences into one banked RAM array
@@ -29,16 +28,13 @@ indices differing in bit
     h = n - 1 - k                                  ("hole bit")
 
 so natural-order input leaves the result bit reversed -- which is exactly what
-the Sec. 3.3 write-back path exists to undo -- and the subset-switch state is
-S = h when h < m and 0 otherwise, identical to Algorithm 1 lines 8-11.
+the Sec. 3.3 write-back path exists to undo.
 
-Algorithm 1
------------
-`algorithm1()` below is the single source of per-cycle control in this
-simulator.  It implements the *repaired* index construction: the published
-lines 5-6 do not yield a conflict-free grouping (see docs/algorithm1_fix.md for
-the diagnosis, the exhaustive counterexample and the proof of the replacement).
-Lines 7-11 of the published listing are reproduced verbatim.
+Per-cycle control
+-----------------
+`cycle_control()` is the single source of index vectors and PRS control in this
+simulator; `ButterflySchedule` is just a loop over it, and `validate()` proves
+its output conflict free, complete and equal to the P_f permutation.
 """
 
 from __future__ import annotations
@@ -52,8 +48,8 @@ import numpy as np
 __all__ = [
     "popcount", "bit_rev", "bit_rev_array", "insert_zero", "bsm", "bsm_array",
     "FixedPointFormat", "BankConflictError", "BankedMemory",
-    "PermuteRotateSwitch", "fcs_matrix", "interconnect_cost",
-    "CycleControl", "algorithm1", "ButterflySchedule",
+    "PermuteRotateSwitch", "prs_cost",
+    "CycleControl", "cycle_control", "ButterflySchedule",
     "fft_coefficients", "random_bl_coefficients", "expand_coefficients",
     "coefficients_from_paper_layout", "butterfly_reference",
     "bitrev_schedule", "TransformStats", "FlexBE", "BEArray",
@@ -222,8 +218,8 @@ class PermuteRotateSwitch:
     """PRS: barrel shifter (rotation R) followed by a subset switch (state S).
 
     read_map(R, S)[j] = (pi_S[j] + R) mod P is the bank that butterfly slot j
-    reads, so the PRS realises the FCS permutation P_f = P_s x P_r at
-    Theta(m*P_bu) instead of Theta(P_bu^2) interconnect.
+    reads, so the PRS realises the permutation P_f = P_s x P_r with
+    Theta(m*P_bu) interconnect instead of a general crossbar's Theta(P_bu^2).
     """
 
     def __init__(self, m: int):
@@ -251,27 +247,17 @@ class PermuteRotateSwitch:
         return data_width * (self.m * self.P + (self.m + 1) * (self.P // 2))
 
 
-def fcs_matrix(indices: np.ndarray, m: int) -> np.ndarray:
-    """Baseline crossbar control: P_f[j,k] = 1 iff k = bsm(I[j])."""
-    P = 1 << m
-    Pf = np.zeros((P, P), dtype=np.int8)
-    Pf[np.arange(P), bsm_array(indices, m)] = 1
-    return Pf
-
-
-def interconnect_cost(P_bu: int, data_width: int = 1) -> Dict[str, float]:
-    """Model behind Fig. 9.  FCS: 2P_bu ports x (2P_bu - 1) 2:1 muxes (Eq. 4)."""
+def prs_cost(P_bu: int, data_width: int = 1) -> Dict[str, float]:
+    """Switching cost of the PRS: Theta(m * P_bu), Sec. 3.1."""
     m = (2 * P_bu).bit_length() - 1
     P = 1 << m
-    fcs = data_width * P * (P - 1)
-    prs = PermuteRotateSwitch(m).mux_count(data_width)
-    return {"ports": P, "m": m, "fcs_mux2": fcs, "prs_mux2": prs,
-            "fcs_pipeline_regs": P * (P - 1) * 16,
-            "prs_pipeline_regs": P * m * 16, "ratio": fcs / prs}
+    return {"ports": P, "m": m,
+            "mux2": PermuteRotateSwitch(m).mux_count(data_width),
+            "pipeline_regs": P * m * 16}
 
 
 # ---------------------------------------------------------------------------
-# Algorithm 1 -- the single source of per-cycle control
+# per-cycle control: index vectors, addresses and PRS state
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -286,8 +272,8 @@ class CycleControl:
     coeff_index: np.ndarray       # P_bu twiddle / weight addresses
 
 
-def algorithm1(n: int, P_bu: int, k: int, j: int) -> CycleControl:
-    """Index vectors and PRS control for cycle j of stage k (repaired listing).
+def cycle_control(n: int, P_bu: int, k: int, j: int) -> CycleControl:
+    """Index vectors and PRS control for cycle j of stage k.
 
         h <- n - 1 - k
         if h < m:                          both operands share RAM row H
@@ -300,7 +286,7 @@ def algorithm1(n: int, P_bu: int, k: int, j: int) -> CycleControl:
             S^i       <- 0
         both:
             I^i[2t+1] <- I^i[2t] + 2^h
-            R^i       <- bsm(I^i[0])                       (published line 7)
+            R^i       <- bsm(I^i[0])
 
     Conflict freedom:
 
@@ -314,8 +300,7 @@ def algorithm1(n: int, P_bu: int, k: int, j: int) -> CycleControl:
               (popcount(H) + e + j) mod 2^m -- a pure rotation, S = 0.
 
     Each branch emits exactly N/2^m = N/(2*P_bu) cycles per stage and visits
-    every index once.  S^i also equals the published closed form
-    (n-k-1 on (n-m) <= k <= (n-2), else 0).
+    every index once.
     """
     m = (2 * P_bu).bit_length() - 1
     P = 1 << m
@@ -347,7 +332,7 @@ def algorithm1(n: int, P_bu: int, k: int, j: int) -> CycleControl:
 
 
 class ButterflySchedule:
-    """Every cycle of an N-point transform, emitted by algorithm1()."""
+    """Every cycle of an N-point transform, emitted by cycle_control()."""
 
     def __init__(self, n: int, P_bu: int, P_sub: int = 1,
                  validate: bool = False):
@@ -362,7 +347,7 @@ class ButterflySchedule:
         self.n_stages = self.n - self.s
         self.cycles_per_stage = self.N // self.P
         self.stages: List[List[CycleControl]] = [
-            [algorithm1(self.n, self.P_bu, k, j)
+            [cycle_control(self.n, self.P_bu, k, j)
              for j in range(self.cycles_per_stage)]
             for k in range(self.n_stages)]
         if validate:
@@ -376,12 +361,8 @@ class ButterflySchedule:
         for st in self.stages:
             yield from st
 
-    def published_subset_state(self, k: int) -> int:
-        """S^i as printed in Algorithm 1, lines 8-11."""
-        return (self.n - k - 1) if (self.n - self.m) <= k <= (self.n - 2) else 0
-
     def validate(self) -> None:
-        """Assert conflict freedom, coverage, pairing and PRS == FCS."""
+        """Assert conflict freedom, coverage, pairing and PRS == P_f."""
         prs = PermuteRotateSwitch(self.m)
         for k, stage in enumerate(self.stages):
             seen = np.zeros(self.N, dtype=bool)
@@ -397,11 +378,9 @@ class ButterflySchedule:
                 if np.any((c.indices[0::2] >> c.hole) & 1):
                     raise AssertionError("lower index must have hole bit 0")
                 if not np.array_equal(prs.read_map(c.R, c.S), banks):
-                    raise AssertionError("PRS != FCS permutation")
+                    raise AssertionError("PRS != P_f permutation")
                 if c.R != bsm(int(c.indices[0]), self.m):
                     raise AssertionError("R != bsm(I[0])")
-                if c.S != self.published_subset_state(k):
-                    raise AssertionError("S != published control law")
             if not seen.all():
                 raise AssertionError(f"stage {k}: incomplete coverage")
 

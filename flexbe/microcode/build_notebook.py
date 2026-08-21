@@ -46,9 +46,8 @@ Two things are established here.
 
 1. **A cycle-level model of the engine**, which reproduces the paper's headline
    numbers exactly — 15,360 cycles for four 32,768-point FFTs, 0.214 ms for
-   cfg-6 at 300 MHz — and which turned up an error in Algorithm 1 along the way.
-   The repaired index generator is derived, proved and used as the *only*
-   control path in the simulator.
+   cfg-6 at 300 MHz — with the conflict-free schedule derived from the
+   shift-down mapping and checked cycle by cycle.
 
 2. **A microcoded command processor** that makes the accelerator programmable:
    a PL-side sequencer executing 32-byte descriptors. It costs **~3.6k LUT
@@ -59,7 +58,7 @@ Nothing is asserted where it could be measured. The simulator executes the real
 dataflow — banked RAM, switching network, butterfly units, per-cycle control —
 and every architectural claim below is checked by the accompanying test suite.
 Assumptions are confined to one dataclass, `MicrocodeConfig`, and listed in
-Part IV.
+Part III.
 """)
 
 md(r"""
@@ -68,10 +67,10 @@ md(r"""
 
 | module | contents |
 |---|---|
-| `flexbe.py` | the engine: shift-down memory, PRS, Algorithm 1, bit reversal, arithmetic, Eq. (10) |
+| `flexbe.py` | the engine: shift-down memory, PRS, schedule, bit reversal, arithmetic, Eq. (10) |
 | `bspnet.py` | the application: Eq. (1) features, BL branches, Table 7 configs |
 | `microcode.py` | descriptors, program builder, sequencer, Zynq attachment |
-| `test_flexbe.py` | 50 tests |
+| `test_flexbe.py` | 49 tests |
 """)
 
 code("""
@@ -123,16 +122,15 @@ for H in range(4):
 """)
 
 md(r"""
-## 1.2 The schedule, and why $h = n-1-k$
+## 1.2 The schedule
 
-Stage $k$ pairs indices differing in bit $h$. The paper's control law (Algorithm 1
-line 9, $S^i = n-k-1$ on $(n-m)\le k\le(n-2)$) is only correct for
+Stage $k$ pairs indices differing in bit
 
 $$h = n-1-k$$
 
 i.e. decimation in frequency: natural-order input, bit-reversed output — which is
-precisely what the Sec. 3.3 write-back exists to undo. Given that, conflict
-freedom forces two regimes:
+precisely what the Sec. 3.3 write-back exists to undo. Conflict freedom then
+forces two regimes:
 
 **$h < m$** — both operands share a row. Read the whole row: banks
 $(\mathrm{popcount}(H)+\mathit{low})\bmod 2^m$ are all distinct, and slot $j$ reads bank
@@ -144,51 +142,54 @@ so $\mathrm{popcount}(H+2^{h-m}) = \mathrm{popcount}(H)+1$; take the $P_{bu}$ ev
 low values from both rows and slot $j$ reads bank
 $(\mathrm{popcount}(H)+e+j)\bmod 2^m$ — a pure rotation, $S=0$.
 
-**The subset-switch state falls out as $S = h$ when $h<m$, else 0 — identical to
-the published line 9.**
+**The subset-switch state falls out as $S = h$ when $h<m$, else 0** — only
+$\log_2(2P_{bu})$ distinct states, which is what makes the subset switch a
+log-depth network rather than a crossbar.
+
+`flexbe.cycle_control(n, P_bu, k, j)` is the closed form of both regimes and is
+the only control path in the simulator: every result below is produced by it.
 """)
 
 code("""
 sched = fx.ButterflySchedule(n=10, P_bu=16, validate=True)
 print(f"N={sched.N}, 2*P_bu={sched.P}, stages={sched.n_stages}, "
       f"cycles/stage={sched.cycles_per_stage}, total={sched.total_cycles}")
-print("validate(): conflict-free, complete, PRS == FCS, R = bsm(I[0]), "
-      "S == published law\\n")
-print(f"{'k':>2} {'hole h':>7} {'S':>3} {'published S':>12} {'regime':>8} {'R of first 4 cycles':>22}")
+print("validate(): conflict-free, complete coverage, PRS == P_f, R = bsm(I[0])\\n")
+print(f"{'k':>2} {'hole h':>7} {'S':>3} {'regime':>8} {'R of first 4 cycles':>22}")
 for k, stage in enumerate(sched.stages):
     c = stage[0]
-    print(f"{k:>2} {c.hole:>7} {c.S:>3} {sched.published_subset_state(k):>12} "
+    print(f"{k:>2} {c.hole:>7} {c.S:>3} "
           f"{('row' if c.hole < sched.m else '2-row'):>8} "
           f"{', '.join(str(x.R) for x in stage[:4]):>22}")
 """)
 
 md(r"""
-## 1.3 PRS versus FCS
+## 1.3 The permute-rotate switch
 
-The FCS is a general crossbar: $2P_{bu}$ ports, each a $2P_{bu}$-to-1 mux, i.e.
-$2P_{bu}-1$ 2:1 muxes each (Eq. 4) — $\Theta(P_{bu}^2)$. The PRS is a barrel
-shifter plus one of only $m$ stride permutations — $\Theta(mP_{bu})$.
+Because only $m$ subset states occur, the permutation $\mathbf{P}_f$ needed each
+cycle decomposes as a barrel shift by $R$ followed by one of $m$ fixed stride
+permutations, so the switch costs $\Theta(mP_{bu})$ 2:1 multiplexers:
+$mP$ for the barrel shifter plus $(m{+}1)2^{m-1}$ for the subset switch.
 
-**By hand at 128 ports** ($P_{bu}=64$, $m=7$): $128\times127 = 16{,}256$ against
-$7(128)+8(64) = 1{,}408$, a factor of 11.5. Note the crossover — at 4 ports the
-staged PRS is *worse* (14 vs 12), consistent with Fig. 9 starting where the
-curves nearly touch.
+**By hand at 128 ports** ($P_{bu}=64$, $m=7$): $7(128)+8(64) = 1{,}408$ muxes per
+bit, against the $128\times127 = 16{,}256$ a general crossbar over the same ports
+would need.
 """)
 
 code("""
-ports, fcs, prs = [], [], []
-print(f"{'ports':>6} {'m':>2} {'FCS mux2':>10} {'PRS mux2':>10} {'ratio':>7}")
+ports, prs, quad = [], [], []
+print(f"{'ports':>6} {'m':>2} {'PRS mux2':>10} {'pipeline regs':>14}")
 for P_bu in (2,4,8,16,32,64):
-    c = fx.interconnect_cost(P_bu)
-    ports.append(c['ports']); fcs.append(c['fcs_mux2']); prs.append(c['prs_mux2'])
-    print(f"{c['ports']:>6} {c['m']:>2} {c['fcs_mux2']:>10,} {c['prs_mux2']:>10,} {c['ratio']:>6.2f}x")
+    c = fx.prs_cost(P_bu)
+    ports.append(c['ports']); prs.append(c['mux2']); quad.append(c['ports']*(c['ports']-1))
+    print(f"{c['ports']:>6} {c['m']:>2} {c['mux2']:>10,} {c['pipeline_regs']:>14,}")
 
 fig, ax = plt.subplots()
-ax.plot(ports, fcs, 'o-', label='FCS (BE-base)  $\\\\Theta(P_{bu}^2)$')
-ax.plot(ports, prs, 's-', label='PRS (FlexBE)  $\\\\Theta(m P_{bu})$')
+ax.plot(ports, prs, 's-', label='PRS  $\\\\Theta(m P_{bu})$')
+ax.plot(ports, quad, ':', c='grey', label='general crossbar  $\\\\Theta(P_{bu}^2)$')
 ax.set_xscale('log', base=2); ax.set_yscale('log', base=2)
 ax.set_xlabel('switching ports $2P_{bu}$'); ax.set_ylabel('2:1 muxes per bit')
-ax.set_title('Interconnect cost (model behind Fig. 9)'); ax.legend()
+ax.set_title('Switching cost'); ax.legend()
 plt.tight_layout(); plt.show()
 """)
 
@@ -221,13 +222,13 @@ print("\\nBL  : engine output equals the dense butterfly matrix:", np.allclose(y
 md(r"""
 ## 1.5 Sub-parallelism (Alg. 2, Eq. 5) and bit reversal (Alg. 3)
 
-BE-base cannot process $l < 2P_{bu}$ — short vectors must be zero padded.
-FlexBE interleaves $P_{sub} = 2P_{bu}/l$ transforms into one vector and stops
-after $\log_2 l$ stages. This is where BSPNet spends its time: cfg-6 has
-$d_{in}=8$ against $2P_{bu}=32$, so $P_{sub}=4$.
+A datapath $2P_{bu}$ wide would otherwise have to zero pad any transform shorter
+than that. Sub-parallelism instead interleaves $P_{sub} = 2P_{bu}/l$ transforms
+into one vector and stops after $\log_2 l$ stages. This is where BSPNet spends
+its time: cfg-6 has $d_{in}=8$ against $2P_{bu}=32$, so $P_{sub}=4$.
 
-**By hand** — 1024 vectors of length 8 on one $P_{bu}=16$ engine: padding costs
-$1024\times 32/32\times 5 = 5{,}120$ cycles, sub-parallelism costs
+**By hand** — 1024 vectors of length 8 on one $P_{bu}=16$ engine: padding to 32
+would cost $1024\times 32/32\times 5 = 5{,}120$ cycles, sub-parallelism costs
 $1024/4\times 3 = 768$. Ratio $6.67\times$ = $P_{sub}$ (4) times the wasted
 stages ($5/3$).
 
@@ -303,143 +304,12 @@ print(f"  {'total':44s} {tot:10,.0f} cyc  {tot/300e6*1e3:7.4f} ms"
 """)
 
 # -------------------------------------------------------------- PART II
+# -------------------------------------------------------------- PART II
 md(r"""
 ---
-# Part II — An error in Algorithm 1
+# Part II — The microcoded command processor
 
-## 2.1 The two halves
-
-| lines | content | status |
-|---|---|---|
-| 5–6 | $ii \leftarrow \mathrm{rotate}_{n-1}(base,k{+}1)$; $I^i[0]\leftarrow\mathrm{rotate}_n(2ii,k)$ | **does not give a conflict-free grouping** |
-| 7–11 | $R^i = \mathrm{bsm}(I^i[0])$; $S^i = n{-}k{-}1$ on $(n{-}m)..(n{-}2)$, else 0 | correct — keep verbatim |
-
-Since $\mathrm{rotate}_n(2x,k) = \mathrm{ins}(\mathrm{rotate}_{n-1}(x,k),k)$,
-
-$$I^i[0] = \mathrm{ins}\big(\mathrm{rotate}_{n-1}(base,\,2k+1),\;k\big)$$
-
-— the operand is rotated **twice** by roughly the stage index, and the hole lands
-at bit $k$ instead of $n-1-k$. Only $h = n-1-k$ is compatible with line 9 and
-with the Sec. 3.3 write-back.
-""")
-
-code("""
-def published(n, P_bu, k, j, rot=1):
-    "Algorithm 1 lines 5-6 exactly as printed (rot=1)."
-    return fx.rotl(2*fx.rotl(j*P_bu, k+rot, n-1), k, n) if hasattr(fx,'rotl') else None
-
-def rotl(x, q, width):
-    q %= width; mask = (1<<width)-1; x &= mask
-    return x if q == 0 else ((x << q) | (x >> (width-q))) & mask
-
-def published(n, P_bu, k, j, rot=1):
-    return rotl(2*rotl(j*P_bu, k+rot, n-1), k, n)
-
-n_, P_bu = 10, 16
-ok = all(published(n_,P_bu,k,j) == fx.insert_zero(rotl(j*P_bu, 2*k+1, n_-1), k)
-         for k in range(n_) for j in range(1 << (n_-5)))
-print("rotate_n(2*ii,k) == ins(rotate_{n-1}(base,2k+1), k):", ok)
-""")
-
-md(r"""
-## 2.2 Exhaustive counterexample
-
-For small cases we enumerate **every** conflict-free grouping of a stage and ask
-whether any admits the published $I^i[0]$ values as distinct cycle
-representatives. For $N=8$, $P_{bu}=2$ the only conflict-free grouping is the
-row-based $\{0,1,2,3\}/\{4,5,6,7\}$, while the formula yields representatives
-$0$ and $2$ — which share a row. That is a proof, not a symptom. Both rotation
-readings and both stage orders are tried.
-""")
-
-code("""
-import itertools
-def matchings(items, size):
-    if not items: yield []; return
-    first, rest = items[0], items[1:]
-    for comb in itertools.combinations(rest, size-1):
-        remain = [x for x in rest if x not in comb]
-        for tail in matchings(remain, size): yield [(first,)+comb] + tail
-
-rules = {'DIF  h=n-1-k': lambda n,k: n-1-k, 'DIT  h=k    ': lambda n,k: k}
-for nn, P_bu in [(3,2),(4,2),(5,2)]:
-    mm = (2*P_bu).bit_length()-1; N_, Pp = 1<<nn, 1<<mm
-    for label, rule in rules.items():
-        for rot in (1,0):
-            verdict = "feasible"
-            for k in range(nn):
-                h = rule(nn,k)
-                lower = [a for a in range(N_) if not (a>>h)&1]
-                parts = [g for g in matchings(lower, P_bu)
-                         if all(len({fx.bsm(x,mm) for a in grp for x in (a,a+(1<<h))})==Pp
-                                for grp in g)]
-                reps = [published(nn,P_bu,k,j,rot) for j in range(N_//Pp)]
-                def cyc_of(part, r):
-                    return next(i for i,grp in enumerate(part)
-                                if any(r in (a,a+(1<<h)) for a in grp))
-                if not any(len({cyc_of(p,r) for r in reps})==len(reps) for p in parts):
-                    verdict = (f"INFEASIBLE at k={k} (h={h}): none of {len(parts)} "
-                               f"conflict-free partitions admits reps={reps}")
-                    break
-            print(f"N={N_:>3} P_bu={P_bu} {label} rot=k+{rot}: {verdict}")
-""")
-
-md(r"""
-## 2.3 The repair
-
-Only lines 5–6 change. With $\mathrm{ins}(x,p) = ((x \gg p)\ll(p{+}1))\,|\,(x \bmod 2^p)$:
-
-```
-h <- n-1-k
-if h < m:  H <- j                      I^i[2t] <- (H << m) + ins(t, h)     S^i <- h
-else:      e <- j mod 2
-           H <- ins(j >> 1, h-m)       I^i[2t] <- (H << m) + 2t + e        S^i <- 0
-both:      I^i[2t+1] <- I^i[2t] + 2^h  R^i <- bsm(I^i[0])
-```
-
-* $S^i = h$ for $h<m$ **is** the published $S^i = n-k-1$ — line 9 survives untouched;
-* $R^i$ reads off the construction as $\mathrm{popcount}(H)+e$, cheaper than recomputing bsm;
-* the revised listing gives the **whole** vector $I^i[0..2P_{bu}{-}1]$, which the published version delegates to "a specific circuit" of [11] — the gap a reimplementer falls into.
-
-Conflict freedom is the two-case argument of §1.2. Hardware cost is unchanged in
-character: an $(n{-}m)$-bit counter, one insert-a-zero network at a
-stage-constant position (one 2:1 mux per bit, select = thermometer code of
-$h{-}m$, folding into the existing barrel-shifter control), and a popcount the
-bsm datapath already computes — still far lighter than BE-base's
-priority-encoder reverse lookup, so Fig. 10 is unaffected.
-
-`flexbe.algorithm1()` is a direct transcription and is the **only** control path
-in this simulator: every FFT and BL result above was produced by it.
-`docs/algorithm1_fix.md` has the full argument, `docs/algorithm1_fixed.tex` a
-drop-in `algorithm2e` listing.
-""")
-
-code("""
-print(f"{'N':>7} {'P_bu':>5}  conflict-free  complete  pairing  lines 7-11")
-for nn, P_bu in [(3,1),(4,2),(6,2),(6,4),(9,4),(10,16),(12,16)]:
-    mm = (2*P_bu).bit_length()-1
-    if nn < mm: continue
-    N_, Pp = 1<<nn, 1<<mm
-    cf = comp = pair = law = True
-    for k in range(nn):
-        h, seen = nn-1-k, np.zeros(N_, bool)
-        wantS = (nn-k-1) if (nn-mm) <= k <= (nn-2) else 0
-        for j in range(N_//Pp):
-            c = fx.algorithm1(nn, P_bu, k, j)
-            cf   &= len(np.unique(fx.bsm_array(c.indices, mm))) == Pp
-            comp &= not seen[c.indices].any(); seen[c.indices] = True
-            pair &= bool(np.all(c.indices[1::2]-c.indices[0::2] == (1<<h)))
-            law  &= (c.R == fx.bsm(int(c.indices[0]), mm)) and (c.S == wantS)
-        comp &= seen.all()
-    print(f"{N_:>7} {P_bu:>5}  {str(cf):>13}  {str(comp):>8}  {str(pair):>7}  {law}")
-""")
-
-# -------------------------------------------------------------- PART III
-md(r"""
----
-# Part III — The microcoded command processor
-
-## 3.1 Why a sequencer
+## 2.1 Why a sequencer
 
 FlexBE as published is fixed function: the layer sequence is hardwired. The
 minimal change that makes it programmable is a PL-side sequencer executing a
@@ -451,7 +321,7 @@ the A53 is ARMv8.0 — 128-bit NEON, no SVE). It is the right granularity anyway
 the datapath retires **64 butterflies per cycle**, so anything finer-grained than
 a whole layer spends more time issuing than computing.
 
-## 3.2 The command set
+## 2.2 The command set
 
 ```
 bs.load   mem -> butterfly scratchpad
@@ -469,7 +339,7 @@ Design rules that matter:
 * **`BITREV` is a store addressing mode, not an instruction** — Algorithm 3 costs nothing extra when fused into write-back, and disappears for cfg-4.
 * **One `bs.bfly` retires Eq. (10) cycles of work** — the equation is literally the descriptor's latency formula, and $P_{sub}$/$P_N$ become descriptor fields rather than CSR pokes, i.e. Table 5's runtime parameters become architectural.
 * **The glue is not optional**: Table 11 puts Magnitude Computation at 41k LUT (26%). Without `bs.pow`/`bs.mag`/`bs.pool` you round-trip through memory and lose the win.
-* **Descriptors expose the memory and the transform, never the schedule.** No opcode names a bank index, a PRS control word or a cycle. Part II is exactly the story of why the schedule may need to change after silicon.
+* **Descriptors expose the memory and the transform, never the schedule.** No opcode names a bank index, a PRS control word or a cycle, so the addressing and control can be retuned without breaking a single descriptor program.
 """)
 
 code("""
@@ -484,7 +354,7 @@ print("\\nopcodes:", ", ".join(f"{k}=0x{v:02x}" for k, v in mc.OPCODES.items()))
 """)
 
 md(r"""
-## 3.3 The program for one inference
+## 2.3 The program for one inference
 
 ~104 descriptors, 3.3 kB. Compute cycles come from `bspnet.cycle_breakdown`, so
 the accelerator side is exactly the Eq. (10) model validated in Part I.
@@ -503,7 +373,7 @@ for c in cmds[:9]:
 """)
 
 md(r"""
-## 3.4 Issue mechanism
+## 2.4 Issue mechanism
 
 **By hand**: ~104 commands × 0.4 µs of posted MMIO = 42 µs against a 214 µs
 inference — 19% overhead before anything else goes wrong. With PYNQ's
@@ -589,15 +459,15 @@ md(r"""
 * Context switching with an architectural scratchpad is the known hard part (Hwacha and Gemmini both wrestled with it). For an edge RFML box, marking the region process-private and non-preemptible for a command's duration is probably enough — but say so explicitly rather than leaving it implied.
 """)
 
-# -------------------------------------------------------------- PART IV
+# -------------------------------------------------------------- PART III
 md(r"""
 ---
-# Part IV — Assumptions, and what to measure next
+# Part III — Assumptions, and what to measure next
 
-## 4.1 Measured vs assumed
+## 3.1 Measured vs assumed
 
 **Measured** (executed code, exact by construction): every cycle of the schedule —
-bank conflicts, coverage, PRS/FCS equivalence, arithmetic; FFT/BL results against
+bank conflicts, coverage, the PRS permutation, arithmetic; FFT/BL results against
 `numpy.fft`; Algorithm 3's permutation, conflict freedom and $N/P$ cycle count;
 descriptor encoding and program structure.
 
@@ -618,7 +488,7 @@ One modelling choice to flag in any write-up: the program adds
 the RTL may fuse into the surrounding dataflow. If so the real overheads are
 slightly lower than shown.
 
-## 4.2 The experiment that would settle it
+## 3.2 The experiment that would settle it
 
 Build the sequencer on the same ZCU104, reusing the existing Verilog BE array
 untouched, and measure three points: the hardwired design (Table 11), the
@@ -632,12 +502,11 @@ descriptor ring, and the current PYNQ flow. Two results make it publishable:
 Adding a streamed AXI input path would close most of the remaining batch-1
 residual.
 
-## 4.3 Recommended paper actions
+## 3.3 Recommended paper actions
 
-1. **Fix Algorithm 1 lines 5–6** (Part II); `docs/algorithm1_fixed.tex` is drop-in. Also state the whole vector $I^i$, not just $I^i[0]$.
-2. **Clarify Eq. (10)**: $P_N$ = number of length-$l$ sequences, $N$ = engine computational length.
-3. **State the row-rotation reading of Eq. (3)** — it makes the conflict-freedom argument two lines.
-4. Consider noting that the Fig. 15a gap is partly PS-side, with the descriptor-ring number as evidence.
+1. **Clarify Eq. (10)**: $P_N$ = number of length-$l$ sequences, $N$ = engine computational length.
+2. **State the row-rotation reading of Eq. (3)** — it makes the conflict-freedom argument two lines.
+3. Consider noting that the Fig. 15a gap is partly PS-side, with the descriptor-ring number as evidence.
 """)
 
 md(r"""
@@ -652,8 +521,8 @@ md(r"""
 | `bsm`, `bsm_array` | Eq. (3) bank index |
 | `FixedPointFormat` | Q1.15, 32-bit accumulate, convergent rounding, saturation |
 | `BankedMemory` | $P$ single-port banks; raises `BankConflictError` |
-| `PermuteRotateSwitch`, `fcs_matrix`, `interconnect_cost` | Sec. 3.1 and the Fig. 9 model |
-| `CycleControl`, **`algorithm1`**, `ButterflySchedule` | the repaired listing and the full control sequence; `validate()` |
+| `PermuteRotateSwitch`, `prs_cost` | Sec. 3.1 switching and its cost |
+| `CycleControl`, **`cycle_control`**, `ButterflySchedule` | per-cycle control and the full sequence; `validate()` |
 | `fft_coefficients`, `random_bl_coefficients`, `expand_coefficients`, `coefficients_from_paper_layout` | twiddles, BL weights, $P_{sub}$ expansion, Table 4 layout |
 | `butterfly_reference` | golden datapath |
 | `bitrev_schedule` | Algorithm 3 |
@@ -662,8 +531,8 @@ md(r"""
 
 ## `bspnet.py`
 
-`BSPNetConfig` (Table 7) · `CONFIGS` cfg-1..8 · `HWConfig`/`HW` (BE-base-1,
-BE-base-2, FlexBE, BSP-Flex with Table 10 $F_{max}$) · `cycle_breakdown`,
+`BSPNetConfig` (Table 7) · `CONFIGS` cfg-1..8 · `HWConfig`/`HW` (FlexBE,
+BSP-Flex with Table 10 $F_{max}$) · `cycle_breakdown`,
 `total_cycles`, `latency_ms`, `throughput_sps` · `BSPNet.features` (Eq. 1),
 `.branch`, `.forward` · `design_space_table`.
 
@@ -673,11 +542,6 @@ BE-base-2, FlexBE, BSP-Flex with Table 10 $F_{max}$) · `cycle_breakdown`,
 `build_program` · `MicrocodeConfig`/`PLATFORMS` (pynq, mmio, ring, static, tuned) ·
 `Sequencer` → `RunReport` · `compare_platforms`, `ring_depth_sweep`,
 `batch_sweep`, `port_budget`, `sequencer_area`.
-
-## `docs/`
-
-`algorithm1_fix.md` — the diagnosis, repair and proof.
-`algorithm1_fixed.tex` — drop-in `algorithm2e` listing.
 """)
 
 code("""
@@ -703,7 +567,7 @@ md(r"""
 ## How to run
 
 ```bash
-python test_flexbe.py              # 50 tests, ~3 s
+python test_flexbe.py              # 49 tests, ~3 s
 python build_notebook.py           # regenerate this notebook
 ```
 
