@@ -1,0 +1,5 @@
+# Simulator and tests need only NumPy.
+numpy>=1.24
+
+# Optional: figures in FlexBE_microcode.ipynb / rebuilding the notebook.
+matplotlib>=3.5
