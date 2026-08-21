@@ -28,6 +28,8 @@ import numpy as np
 
 import flexbe as fx
 import bspnet as bs
+import isa_model as im
+import zynq_model as zm
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +345,19 @@ class TestBitReversal(unittest.TestCase):
                 self.assertTrue(np.array_equal(k[cyc] & (P - 1), expect))
                 cyc += 1
 
+    def test_short_transform_writeback_falls_back_cleanly(self):
+        """N < P^2 is outside Algorithm 3's regime: model it, do not claim
+        conflict freedom, and still produce the right permutation."""
+        for N, P_bu in [(256, 16), (512, 16), (32, 16)]:
+            with self.subTest(N=N, P_bu=P_bu):
+                self.assertLess(N, (2 * P_bu) ** 2)
+                rng = np.random.default_rng(N)
+                x = rng.normal(size=N) + 1j * rng.normal(size=N)
+                eng = fx.FlexBE(P_bu)
+                y, st = eng.transform(x, bitrev=True, datapath="cycle")
+                self.assertTrue(np.allclose(y[0], np.fft.fft(x)))
+                self.assertEqual(st.bitrev_cycles, max(1, N // (2 * P_bu)))
+
     def test_bitrev_cycle_count(self):
         N, P_bu = 1024, 16
         rng = np.random.default_rng(5)
@@ -508,6 +523,207 @@ class TestBSPNet(unittest.TestCase):
         items = dict(bs.cycle_breakdown(cfg, bs.HW["FlexBE"]))
         fft = [v for k, v in items.items() if "FFT" in k][0]
         self.assertEqual(fft, 15360)
+
+
+# ---------------------------------------------------------------------------
+class TestISAModel(unittest.TestCase):
+    """The instruction traces are real: generated, then executed."""
+
+    VARIANTS = [dict(fused_butterfly=True, has_shuffle=True),
+                dict(fused_butterfly=False, has_shuffle=True),
+                dict(fused_butterfly=False, has_shuffle=False,
+                     has_vtwid=False, has_complex=False)]
+
+    def _machine(self, vlen, **kw):
+        base = dict(name="t", vlen_bits=vlen, lanes=32)
+        return im.MachineConfig(**{**base, **kw})
+
+    def test_generated_program_computes_the_transform(self):
+        """Short (l <= VL) and long (l > VL, multi-pass) regimes, all variants."""
+        for l, n_seq, vlen in [(8, 16, 512), (32, 8, 1024), (256, 4, 1024),
+                               (4096, 1, 2048)]:
+            for kw in self.VARIANTS:
+                with self.subTest(l=l, vlen=vlen, **kw):
+                    mc = self._machine(vlen, **kw)
+                    rng = np.random.default_rng(l)
+                    x = (rng.normal(size=(n_seq, l))
+                         + 1j * rng.normal(size=(n_seq, l)))
+                    mem = {"x": x.reshape(-1).astype(complex).copy()}
+                    prog = im.gen_transform(l, n_seq, mc)
+                    im.run_program(prog, mem, mc)
+                    rev = fx.bit_rev_array(int(math.log2(l)))
+                    ref = np.fft.fft(x, axis=1)[:, np.argsort(rev)]
+                    self.assertTrue(np.allclose(mem["x"].reshape(n_seq, l), ref))
+
+    def test_twiddle_hoisting_is_semantics_preserving(self):
+        for nt in (1, 2, 8):
+            with self.subTest(n_twid_regs=nt):
+                mc = self._machine(1024, hoist_twiddles=True, n_twid_regs=nt)
+                ref_mc = self._machine(1024, hoist_twiddles=False)
+                rng = np.random.default_rng(0)
+                x = rng.normal(size=(4, 256)) + 1j * rng.normal(size=(4, 256))
+                outs = []
+                for m in (mc, ref_mc):
+                    mem = {"x": x.reshape(-1).astype(complex).copy()}
+                    im.run_program(im.gen_transform(256, 4, m), mem, m)
+                    outs.append(mem["x"].copy())
+                self.assertTrue(np.allclose(outs[0], outs[1]))
+                self.assertLess(len(im.gen_transform(256, 4, mc)),
+                                len(im.gen_transform(256, 4, ref_mc)))
+
+    def test_memory_passes_match_the_closed_form(self):
+        """log2(l) - log2(VL) + 1 passes over memory for a long transform."""
+        mc = self._machine(1024)                       # VL = 32
+        l = 4096
+        prog = im.gen_transform(l, 1, mc)
+        elems = sum(i.elems for i in prog if i.cls in ("load", "store")
+                    and i.imm.get("mem") == "x")
+        passes = elems / (2 * l)
+        self.assertEqual(passes, math.log2(l) - math.log2(mc.VL) + 1)
+
+    def test_fused_butterfly_removes_the_permutes(self):
+        fused = self._machine(4096, fused_butterfly=True)
+        expl = self._machine(4096, fused_butterfly=False)
+        pf = im.gen_transform(32, 1024, fused)
+        pe = im.gen_transform(32, 1024, expl)
+        self.assertEqual(sum(1 for i in pf if i.cls == "perm"), 0)
+        self.assertGreater(sum(1 for i in pe if i.cls == "perm"), 0)
+        r_f = im.IssueModel(fused).run(pf)
+        r_e = im.IssueModel(expl).run(pe)
+        self.assertLess(r_f.cycles, r_e.cycles)
+
+    def test_issue_model_is_monotone(self):
+        """More lanes / more LSU bandwidth never costs cycles."""
+        prev = None
+        for lanes in (16, 32, 64, 128):
+            mc = self._machine(8192, lanes=lanes, lsu_elems=1024)
+            r = im.IssueModel(mc).run(im.gen_transform(32, 4096, mc))
+            if prev is not None:
+                self.assertLessEqual(r.cycles, prev)
+            prev = r.cycles
+
+    def test_accelerator_options_stay_close_to_hardwired(self):
+        cfg, hw = bs.CONFIGS["cfg-6"], bs.HW["BSP-Flex"]
+        base = bs.total_cycles(cfg, hw)
+        for key in ("A", "B"):
+            cyc = im.accelerator_cycles(cfg, hw, im.SEQUENCERS[key])
+            self.assertGreaterEqual(cyc, base)
+            self.assertLess(cyc / base, 1.05, msg=f"option {key}")
+
+    def test_vector_options_are_slower_and_bottlenecked_off_the_datapath(self):
+        cfg = bs.CONFIGS["cfg-6"]
+        base = bs.total_cycles(cfg, bs.HW["BSP-Flex"])
+        cyc, items = im.bspnet_cycles_isa(cfg, im.MACHINES["C-fused"])
+        self.assertGreater(cyc / base, 2.0)
+        self.assertIn(items[0][2], ("lsu", "alu", "perm", "twid"))
+
+    def test_baseline_rvv_crossbar_does_not_fit_the_device(self):
+        """Sec. 3.1's Theta(P^2) argument, applied to vrgather."""
+        gather = im.estimate_area(im.MACHINES["D-rvv10"])
+        shuffle = im.estimate_area(im.MACHINES["C-fused"])
+        self.assertFalse(gather.fits())
+        self.assertTrue(shuffle.fits())
+        self.assertGreater(gather.detail["permute_network"],
+                           8 * shuffle.detail["permute_network"])
+
+    def test_area_calibrated_to_table10(self):
+        """64 butterfly lanes should reproduce the Table 10 BE-array numbers."""
+        mc = self._machine(16384, lanes=128)           # 64 complex butterflies
+        a = im.estimate_area(mc)
+        self.assertAlmostEqual(a.detail["butterfly_datapath"], 61_574, delta=100)
+        self.assertAlmostEqual(a.dsp, 642, delta=5)
+
+    def test_lsu_sweep_is_monotone_and_saturates(self):
+        rows = im.lsu_sweep()
+        ratios = [r["ratio"] for r in rows]
+        self.assertEqual(ratios, sorted(ratios, reverse=True))
+        self.assertGreater(ratios[0] / ratios[-1], 3.0)
+        self.assertEqual(rows[0]["bottleneck"], "lsu")
+
+
+# ---------------------------------------------------------------------------
+class TestZynqModel(unittest.TestCase):
+    """PS-PL interface: descriptor issue, DMA/compute overlap, completion."""
+
+    def setUp(self):
+        self.cfg, self.hw = bs.CONFIGS["cfg-6"], bs.HW["BSP-Flex"]
+
+    def test_command_stream_is_well_formed(self):
+        cmds = zm.bspnet_commands(self.cfg, self.hw)
+        self.assertGreater(len(cmds), 50)
+        self.assertLess(len(cmds), 200)
+        for n, c in enumerate(cmds):
+            self.assertTrue(all(d < n for d in c.deps), "dependency not in order")
+            self.assertIn(c.kind, ("dma_in", "dma_out", "compute"))
+        self.assertEqual(cmds[0].kind, "dma_in")
+        self.assertEqual(cmds[-1].kind, "dma_out")
+
+    def test_compute_commands_carry_the_bspnet_cycles(self):
+        cmds = zm.bspnet_commands(self.cfg, self.hw)
+        cyc = sum(c.cycles for c in cmds if c.kind == "compute")
+        base = bs.total_cycles(self.cfg, self.hw)
+        self.assertGreaterEqual(cyc, base)          # plus pow / mag / pool glue
+        self.assertLess(cyc / base, 1.15)
+
+    def test_latency_never_beats_the_datapath(self):
+        for key in zm.PLATFORMS:
+            rep = zm.PSPLModel(zm.PLATFORMS[key]).run(
+                zm._stream(self.cfg, self.hw, 1,
+                           zm.PLATFORMS[key].input_chunks))
+            self.assertGreaterEqual(rep.latency_us, rep.compute_us)
+
+    def test_pynq_flow_dominated_by_host_not_accelerator(self):
+        rows = {r["key"]: r for r in zm.compare_platforms()}
+        self.assertEqual(rows["pynq"]["critical"], "host")
+        self.assertGreater(rows["pynq"]["overhead_pct"], 100.0)
+        self.assertLess(rows["static-a53"]["overhead_pct"], 15.0)
+        self.assertEqual(rows["static-a53"]["critical"], "compute")
+
+    def test_descriptor_ring_beats_mmio_per_command(self):
+        rows = {r["key"]: r for r in zm.compare_platforms()}
+        self.assertLess(rows["static-a53"]["latency_us"],
+                        rows["mmio-linux"]["latency_us"])
+
+    def test_prefetch_depth_saturates(self):
+        rows = zm.ring_depth_sweep(depths=(1, 2, 4, 8, 16, 32))
+        lat = [r["latency_us"] for r in rows]
+        self.assertEqual(lat, sorted(lat, reverse=True))
+        self.assertAlmostEqual(lat[-1], lat[-2], places=6)
+
+    def test_per_resource_queues_help_only_across_inferences(self):
+        """Next sample's input DMA can only overlap if its descriptor is not
+        stuck behind the current inference's compute commands."""
+        shared = zm.PLATFORMS["static-a53"]
+        split = zm.PLATFORMS["tuned-r5"]
+        one = [zm.PSPLModel(p).run(zm._stream(self.cfg, self.hw, 1,
+                                              p.input_chunks))
+               for p in (shared, split)]
+        many = [zm.PSPLModel(p).run(zm._stream(self.cfg, self.hw, 8,
+                                               p.input_chunks))
+                for p in (shared, split)]
+        self.assertAlmostEqual(one[0].per_inference_us, one[1].per_inference_us,
+                               delta=5.0)
+        self.assertLess(many[1].per_inference_us, many[0].per_inference_us)
+
+    def test_batch_amortises_towards_peak(self):
+        rows = zm.batch_sweep(batches=(1, 2, 4, 8, 10),
+                              keys=("pynq", "tuned-r5"))
+        tuned = [r["tuned-r5"] for r in rows]
+        self.assertEqual(tuned, sorted(tuned))
+        self.assertGreater(tuned[-1] / rows[-1]["peak"], 0.85)
+        self.assertLess(rows[0]["pynq"] / rows[0]["peak"], 0.4)
+
+    def test_double_buffering_matters(self):
+        p = zm.PLATFORMS["static-a53"]
+        off = zm.replace(p, double_buffer=False)
+        cmds = zm._stream(self.cfg, self.hw, 4)
+        self.assertLess(zm.PSPLModel(p).run(cmds).latency_us,
+                        zm.PSPLModel(off).run(cmds).latency_us)
+
+    def test_link_is_not_the_constraint(self):
+        b = zm.port_budget()
+        self.assertLess(b["utilisation"], 0.25)
+        self.assertEqual(b["min_hp_ports"], 1)
 
 
 if __name__ == "__main__":

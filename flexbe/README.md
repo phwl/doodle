@@ -10,10 +10,15 @@ sequence) cycle by cycle, checks the architectural invariants the paper claims,
 and reports cycle counts that can be compared against Eq. (10) and the RTL.
 
 ```
+FlexBE_analysis.ipynb executed notebook: the complete analysis, all calculations
 flexbe.py             engine: memory, switches, schedule, bit reversal, arithmetic
 bspnet.py             application: Eq. (1) features, BL branches, Table 7 configs
-test_flexbe.py        39 unit tests (the "test program")
+test_flexbe.py        60 unit tests (the "test program")
 demo_flexbe.py        report reproducing the paper's headline numbers
+isa_model.py          instruction-level backend: microcoded / RoCC / RVV options
+demo_isa.py           option comparison, instruction mix, VLEN and LSU sweeps
+zynq_model.py         PS-PL attachment: descriptor ring, DMA overlap, completion
+demo_zynq.py          issue-mechanism comparison, prefetch depth, batch scaling
 check_algorithm1.py   diagnosis of Algorithm 1 lines 5-6 + verification of the fix
 docs/                 algorithm1_fix.md (proof), algorithm1_fixed.tex (listing)
 ```
@@ -167,6 +172,72 @@ straight from the formula for `N` = 8…4096, `P_bu` = 1…16, and runs an engin
 whose control comes *only* from the revised listing against `numpy.fft`.
 `docs/algorithm1_fix.md` has the full argument and a note on hardware cost;
 `docs/algorithm1_fixed.tex` is a drop-in `algorithm2e` listing.
+
+## Programmability study (`isa_model.py`)
+
+Four ways to make the workload software programmable, all carrying the same 64
+radix-2 butterfly lanes, measured on cfg-6 single-batch inference:
+
+| option | cycles | MHz | ms | x hw | LUT | fits | bottleneck |
+|---|---|---|---|---|---|---|---|
+| hardwired (paper) | 64,320 | 300 | 0.214 | 1.00 | 152,553 | yes | - |
+| A microcoded command processor | 64,592 | 300 | 0.215 | 1.00 | 160,553 | yes | datapath |
+| B RoCC custom instruction | 64,524 | 285 | 0.226 | 1.06 | 172,553 | yes | datapath |
+| C RVV + Zvbfly/Zvshfl/Zvtwid | 238,720 | 250 | 0.955 | 4.45 | 119,342 | yes | LSU |
+| C* as C with 512 B/cycle LSU | 110,974 | 250 | 0.444 | 2.07 | 137,774 | yes | ALU |
+| D RVV 1.0 (vrgather) | 1,277,296 | 250 | 5.109 | 23.8 | 356,910 | **no** | permute |
+
+The instruction streams for C and D are *generated and executed* - `run_program`
+implements the semantics of every proposed instruction and
+`TestISAModel.test_generated_program_computes_the_transform` checks the result
+against `numpy.fft` before any cycle is counted - so the instruction counts are
+exact and only the per-class rates, issue width and clock are assumptions
+(all in `MachineConfig`). Area is calibrated to Table 10 (962 LUT, 10 DSP per BU)
+and the permute networks use the paper's own Eq. (4) cost model.
+
+Three results fall out:
+
+* **the vector options are operand-bandwidth bound, not compute bound.** VLEN
+  saturates by VL = 64; what matters is load-store bandwidth, and closing the
+  gap needs ~512 B/cycle, i.e. a wide banked on-chip scratchpad next to the
+  lanes - which is option B with extra steps.
+* **fusing the permute into the butterfly matters more than adding a permute
+  instruction.** `vbfly.vv` with a stride field (PRS inside the functional unit)
+  removes every permute instruction and is 1.4x faster than a separate
+  `vshfl` + butterfly + `vunshfl`.
+* **a full `vrgather` crossbar does not fit XCZU7EV at matched width.** By the
+  paper's own Theta(P^2) vs Theta(m*P) argument the gather network is >8x the
+  area of the shuffle network, which is what makes option D infeasible rather
+  than merely slow.
+
+## Zynq attachment (`zynq_model.py`)
+
+On Zynq the A53 is hard IP, so there is no custom-instruction port: the
+programmable option becomes a PL-side command sequencer fed by descriptors.
+This model covers issue, DMA/compute overlap and completion for the ~104-command
+cfg-6 stream (`bs.load` / `bs.pow` / `bs.bfly` / `bs.mag` / `bs.pool` /
+`bs.store`), with accelerator cycles taken from `bspnet.cycle_breakdown`.
+
+| issue mechanism | us | overhead | samples/s | critical |
+|---|---|---|---|---|
+| PYNQ / Jupyter flow | 878.3 | +281% | 1,139 | **host** |
+| MMIO per command, Linux | 258.1 | +12.0% | 3,874 | compute |
+| static descriptor ring, A53 | 252.5 | +9.6% | 3,961 | compute |
+| static ring + per-resource queues + streamed input (R5) | 250.3 | +8.7% | 3,995 | compute |
+
+* the PYNQ flow is **host bound**, not accelerator bound - most of the gap
+  between the solid and dashed lines of Fig. 15a is PS-side software;
+* a descriptor ring only needs **4-8 descriptors** of prefetch; deeper buys
+  nothing;
+* **per-resource queues matter only across inferences**: with a single shared
+  ring, the next sample's input-DMA descriptor sits behind ~100 compute
+  descriptors and cannot start early.  Splitting the ring takes batch-10
+  throughput from 3,981 to 4,300 samples/s, i.e. 92% of the datapath peak;
+* the PS-PL link is never the constraint: 0.62 GB/s of 6.4 GB/s available, so
+  **one HP port suffices** - the four ports buy burst overlap for a single
+  record, not throughput;
+* the residual ~9% at batch 1 is the 128 KB input transfer, which overlaps
+  nothing unless the accelerator ingests from a live AXI-stream SDR front end.
 
 ## Extending
 

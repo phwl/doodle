@@ -1,0 +1,10 @@
+# Core simulator, tests and demos need only NumPy.
+numpy>=1.24
+
+# Optional: figures in FlexBE_analysis.ipynb / rebuilding the notebook.
+matplotlib>=3.5
+
+# Optional: only if you want to re-execute the notebook with Jupyter.
+# The shipped notebook is already executed; build_notebook.py regenerates it
+# without Jupyter installed.
+# jupyter

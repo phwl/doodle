@@ -831,9 +831,13 @@ class FlexBE:
             out = view[:, rev, :].reshape(n_comp, N)
             return out, math.ceil(N / self.P) * n_comp
         j, kk = _bitrev_pairs(n, self.m)
+        # Algorithm 3 is defined for the long-transform regime N >= P^2; below
+        # it the write-back is modelled as a plain N/P-cycle permutation and is
+        # not claimed to be bank-conflict free, so it is not checked.
+        exact = n >= 2 * self.m
         out = np.zeros_like(comp)
         for c in range(n_comp):
-            if datapath == "cycle" and self.check_conflicts:
+            if exact and datapath == "cycle" and self.check_conflicts:
                 for jv, kv in zip(j, kk):
                     src_bank = bsm_array(jv, self.m)
                     dst_bank = kv & (self.P - 1)
