@@ -32,22 +32,22 @@ object Fx {
     * a Q(intBits).(fracBits) word.  `acc` carries `fracBits` extra low bits
     * from a full-precision product. */
   def roundSat(acc: SInt, intBits: Int, fracBits: Int, scale: Bool = false.B): SInt = {
-    val w      = intBits + fracBits
-    // total right-shift back to the target LSB: fracBits guard bits, plus one
-    // more when the FFT stage scaling (/2) is active.  Keeping this as a single
-    // shift on one signed value avoids the different-width Mux that previously
-    // corrupted the sign on the negative path.
-    val shift  = Mux(scale, (fracBits + 1).U, fracBits.U)
+    val w        = intBits + fracBits
     val maxShift = fracBits + 1
-    val half   = (1.U << (shift - 1.U)).asSInt          // half an LSB at this shift
-    val biased = acc +& half
-    val shifted = (biased >> shift).asSInt
-    // round-to-even on an exact half: true when all bits below the LSB are the
-    // half bit set and the rest zero.
-    val lowMask = ((1.U << shift).asUInt - 1.U)
-    val halfBit = (1.U << (shift - 1.U)).asUInt
+    // total right-shift back to the target LSB: fracBits guard bits, plus one
+    // more when FFT stage scaling (/2) is active.
+    val shift    = Mux(scale, (fracBits + 1).U, fracBits.U)
+    // half an LSB at the active shift, built wide and signed so the top set bit
+    // is never mistaken for a sign bit (a plain (1.U << k).asSInt can go negative
+    // when k lands on the MSB of the inferred UInt width).
+    val halfU    = (1.U((maxShift + 2).W) << (shift - 1.U))
+    val half     = Cat(0.U(1.W), halfU).asSInt
+    val biased   = acc +& half
+    val shifted  = (biased >> shift).asSInt
+    val lowMask  = ((1.U((maxShift + 2).W) << shift) - 1.U)
+    val halfBit  = halfU
     val exactlyHalf = (acc.asUInt & lowMask) === halfBit
-    val rounded = Mux(exactlyHalf, (shifted & (-2).S(shifted.getWidth.W)).asSInt, shifted)
+    val rounded  = Mux(exactlyHalf, (shifted & (-2).S(shifted.getWidth.W)).asSInt, shifted)
     val hi = ((BigInt(1) << (w - 1)) - 1).S
     val lo = (-(BigInt(1) << (w - 1))).S
     val sat = Mux(rounded > hi, hi, Mux(rounded < lo, lo, rounded))
