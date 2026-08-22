@@ -8,7 +8,7 @@ tests assert the correspondence against golden vectors emitted from that model.
 
 ```
 src/main/scala/flexbe/
-  Bits.scala           popcount, bit-reverse, insert-zero, bsm (Eq. 3)
+  FlexBits.scala           popcount, bit-reverse, insert-zero, bsm (Eq. 3)
   Complex.scala        Q1.15 complex type + general 2x2 butterfly unit
   PRS.scala            permute-rotate switch: barrel shifter + subset switch
   CycleControl.scala   per-cycle idx / addr / R / S / coeff (two regimes)
@@ -18,8 +18,11 @@ src/main/scala/flexbe/
   Sequencer.scala      fetch / decode / dispatch, tag scoreboard, completion
   Emit.scala           SystemVerilog emission
 src/test/scala/flexbe/
-  Golden.scala         vectors generated from flexbe.py (do not edit)
-  FlexBESpec.scala     ChiselSim tests
+  Golden.scala         control-path vectors from flexbe.py (do not edit)
+  NumGolden.scala      numeric I/O + twiddles from flexbe.py (do not edit)
+  FlexBESpec.scala     backend-free golden checks + elaboration
+  EngineSimSpec.scala  Engine FSM sequencing (needs a Verilog backend)
+  EngineNumericSpec.scala  end-to-end 16-point FFT vs the fixed-point model
 ```
 
 ## Build
@@ -28,7 +31,9 @@ Requires JDK 17+ and, on first build, network access to Maven Central for the
 Chisel 6.6.0 artifacts.
 
 ```
-sbt test                     # run the cross-checks against the golden model
+sbt test                          # golden checks + elaboration (no backend)
+sbt "testOnly *EngineSimSpec"     # FSM sequencing in simulation (needs Verilator)
+sbt "testOnly *EngineNumericSpec" # end-to-end FFT numerics (needs Verilator)
 sbt "runMain flexbe.Emit"    # emit SystemVerilog into generated/
 ```
 
@@ -56,11 +61,13 @@ sequencing over `stages × (N/P)` cycles.
   interleaving (`P_sub > 1`) and the `P_N` depth packing are expressed in the
   addressing and the descriptor fields but are exercised in RTL only through the
   `P_sub = 1` path here; the Python model covers the general case.
-* `BankedMemory` uses `SyncReadMem`, i.e. one-cycle read latency. The loop as
-  written issues read and write with the same control on the same addresses
-  (in-place), which is correct for a single engine walking distinct
-  (bank, depth) slots each cycle; a pipelined multi-engine build would add a
-  read/modify/write skew register.
+* `BankedMemory` uses `SyncReadMem` (one-cycle read latency) with per-bank
+  write strobes. The engine loop is pipelined one deep: cycle *t* issues the
+  read, cycle *t+1* computes and writes back using control held in a delay
+  register. Adjacent cycles walk disjoint (bank, depth) slots, so there is no
+  read-after-write hazard; a final drain cycle commits the last write. The
+  equivalence of this schedule to sequential read-modify-write was checked
+  against the Python model (zero error).
 * `Sequencer` models the control plane. Each dispatched command carries a cycle
   budget (from the Eq. 10 model) that its resource lane counts down, reproducing
   the DMA/compute overlap the Python `Sequencer` measures. Wiring the lanes to

@@ -73,16 +73,23 @@ class PRSInverse(val P: Int) extends Module {
     val dout = Output(Vec(P, new Cplx))
   })
   val perms = SubsetPerm.table(P)
-  // For each destination bank b, find the slot j with readMap(j) == b and take
-  // xin(j).  Because readMap is a permutation, invert it combinationally.
-  val slotForBank = Wire(Vec(P, UInt(m.W)))
+
+  // Forward read map, identical to PRS: bankOf(j) = (pi_S[j] + R) mod P.
+  val bankOf = Wire(Vec(P, UInt(m.W)))
   for (j <- 0 until P) {
     val piSj =
       if (m == 1) 0.U(m.W)
       else MuxLookup(io.S, 0.U(m.W))(
         (0 until m).map(s => s.U -> perms(s)(j).U(m.W)))
-    val bank = (piSj +% io.R)(m - 1, 0)
-    slotForBank(bank) := j.U
+    bankOf(j) := (piSj +% io.R)(m - 1, 0)
   }
-  for (b <- 0 until P) io.dout(b) := io.xin(slotForBank(b))
+
+  // Invert combinationally: for each destination bank b, select the slot j whose
+  // bankOf(j) == b.  Written as an explicit per-bank reduction so every element
+  // of dout is unconditionally driven (no runtime-indexed sink).
+  for (b <- 0 until P) {
+    val hit = VecInit((0 until P).map(j => bankOf(j) === b.U))
+    val sel = VecInit((0 until P).map(j => io.xin(j)))
+    io.dout(b) := Mux1H(hit, sel)          // readMap is a permutation: exactly one hit
+  }
 }

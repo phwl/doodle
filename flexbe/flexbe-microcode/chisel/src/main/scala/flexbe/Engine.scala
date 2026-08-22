@@ -1,19 +1,20 @@
 // =============================================================================
 // Engine.scala -- one butterfly engine: the per-cycle loop of Fig. 2.
 //
-// Each cycle:
-//   1. CycleControl emits idx / addr / R / S / coeff for (k, j)
-//   2. read one word per bank from BSPM at addr
-//   3. PRS-A gathers bank order -> butterfly-slot order
-//   4. P_bu butterfly units apply the 2x2 coefficients from CRAM
-//   5. PRS-B scatters slot order -> bank order
-//   6. write back in place to BSPM at addr
+// Pipeline (BSPM is a SyncReadMem, so read data is valid the cycle after the
+// address):
+//   cycle t   : control(k,j) presents read addresses  -> BSPM read issued
+//   cycle t+1 : rData(t) valid -> PRS-A -> butterflies -> PRS-B -> write back,
+//               using control(k,j) held one cycle in a delay register.
+// Consecutive cycles touch disjoint (bank, depth) slots, so a one-deep
+// read/compute/write pipeline has no read-after-write hazard between adjacent
+// cycles; a final drain cycle commits the last write.
 //
-// A simple FSM drives (k, j) over stages*cycles_per_stage for one bs.bfly
-// command.  BSPM is a SyncReadMem, so read data is available the cycle after
-// the address; the loop is pipelined one deep and the write of cycle t occurs
-// with the control of cycle t (addresses are identical for read and write in
-// this in-place datapath).
+// Preload / read-back reuse the engine's own single read/write ports while the
+// FSM is idle, driven by the debug interface below.  A testbench can therefore
+// load BSPM in logical-index space (the hardware applies the bsm skew), run one
+// transform, and read the result back, so the datapath is verified numerically
+// against a reference FFT without adding a second memory port.
 // =============================================================================
 package flexbe
 
@@ -32,18 +33,29 @@ class EngineConfig(
 class Engine(cfg: EngineConfig = new EngineConfig) extends Module {
   val P = 2 * cfg.pBu
   val m = log2Ceil(P)
+  val depthW = log2Ceil(cfg.depth)
+  val sW = if (m > 1) log2Ceil(m) else 1
 
   val io = IO(new Bundle {
-    val start   = Input(Bool())
-    val nCur    = Input(UInt(log2Ceil(cfg.nMax + 1).W))  // stages for this cmd
-    val scale   = Input(Bool())                          // FFT stage scaling
+    val start     = Input(Bool())
+    val nCur      = Input(UInt(log2Ceil(cfg.nMax + 1).W))
+    val scale     = Input(Bool())
     val coeffBase = Input(UInt(log2Ceil(cfg.coeffDepth).W))
-    val busy    = Output(Bool())
-    val done    = Output(Bool())
-    // verification hooks
-    val dbgIdx  = Output(Vec(P, UInt(cfg.nMax.W)))
+    val busy      = Output(Bool())
+    val done      = Output(Bool())
+
+    // ---- debug interface, active only while idle (reuses engine ports) ----
+    val dbgWen  = Input(Bool())                              // BSPM write
+    val dbgWidx = Input(UInt(cfg.nMax.W))                    // logical index
+    val dbgWval = Input(new Cplx(cfg.intBits, cfg.fracBits))
+    val dbgRidx = Input(UInt(cfg.nMax.W))                    // logical index
+    val dbgRval = Output(new Cplx(cfg.intBits, cfg.fracBits))
+    val cWen    = Input(Bool())                              // CRAM write
+    val cWaddr  = Input(UInt(log2Ceil(cfg.coeffDepth).W))
+    val cWval   = Input(Vec(4, new Cplx(cfg.intBits, cfg.fracBits)))
+
     val dbgR    = Output(UInt(m.W))
-    val dbgS    = Output(UInt((if (m>1) log2Ceil(m) else 1).W))
+    val dbgS    = Output(UInt(sW.W))
   })
 
   val bspm = Module(new BankedMemory(P, cfg.depth, cfg.intBits, cfg.fracBits))
@@ -51,22 +63,22 @@ class Engine(cfg: EngineConfig = new EngineConfig) extends Module {
   val prsA = Module(new PRS(P))
   val prsB = Module(new PRSInverse(P))
   val bus  = Seq.fill(cfg.pBu)(Module(new ButterflyUnit(cfg.intBits, cfg.fracBits)))
-
-  // coefficient RAM: P_bu*2*2 words addressed by coeff index (packed 2x2)
   val cram = SyncReadMem(cfg.coeffDepth, Vec(4, new Cplx(cfg.intBits, cfg.fracBits)))
 
-  // ---- control FSM: iterate (k, j) ----------------------------------------
+  when(io.cWen) { cram.write(io.cWaddr, io.cWval) }
+
+  // ---- control FSM --------------------------------------------------------
   val sIdle :: sRun :: sDrain :: Nil = Enum(3)
   val state = RegInit(sIdle)
   val k = RegInit(0.U(log2Ceil(cfg.nMax).W))
   val j = RegInit(0.U((cfg.nMax - m + 1).W))
-  val cyclesPerStage = (1.U << (io.nCur - m.U)).asUInt   // N/P for P_sub=1
+  val cyclesPerStage = (1.U << (io.nCur - m.U)).asUInt
   val lastJ = cyclesPerStage - 1.U
   val lastK = io.nCur - 1.U
+  val running = state === sRun
 
   io.busy := state =/= sIdle
   io.done := false.B
-
   when(state === sIdle) {
     when(io.start) { state := sRun; k := 0.U; j := 0.U }
   }.elsewhen(state === sRun) {
@@ -83,41 +95,65 @@ class Engine(cfg: EngineConfig = new EngineConfig) extends Module {
   ctl.io.k := k
   ctl.io.j := j
 
-  // ---- read ---------------------------------------------------------------
-  for (b <- 0 until P) bspm.io.rAddr(b) := ctl.io.addr(b)
+  // ---- BSPM read port: engine addresses while running, debug idx when idle
+  val dbgRbank  = FlexBits.bsm(io.dbgRidx, m)
+  val dbgRdepth = (io.dbgRidx >> m.U).asUInt
+  for (b <- 0 until P) {
+    bspm.io.rAddr(b) := Mux(running, ctl.io.addr(b),
+                           Mux(b.U === dbgRbank, dbgRdepth, 0.U))
+  }
+  io.dbgRval := bspm.io.rData(RegNext(dbgRbank))   // 1-cycle SyncReadMem latency
+
+  // ---- pipeline registers: hold control one cycle to meet rData latency ---
+  val addrD  = RegNext(ctl.io.addr)
+  val rD     = RegNext(ctl.io.R)
+  val sD     = RegNext(ctl.io.S)
+  val coeffD = RegNext(ctl.io.coeff)
+  val scaleD = RegNext(io.scale)
+  val wEnD   = RegNext(running)
 
   // ---- PRS-A gather -------------------------------------------------------
-  prsA.io.R := ctl.io.R
-  prsA.io.S := ctl.io.S
+  prsA.io.R := rD
+  prsA.io.S := sD
   for (b <- 0 until P) prsA.io.din(b) := bspm.io.rData(b)
 
   // ---- butterflies --------------------------------------------------------
-  val coeffRd = cram.read(ctl.io.coeff(0) + io.coeffBase)  // one shared example
+  // Coefficients are stage-major: CRAM address = coeffBase + k*(l/2) + coeff,
+  // with l/2 = 2^(nCur-1).  The stage base is registered alongside the other
+  // pipelined control so it aligns with coeffD.
+  val kD        = RegNext(k)
+  val nCurD     = RegNext(io.nCur)
+  val stageBase = (kD << (nCurD - 1.U)).asUInt
   for (t <- 0 until cfg.pBu) {
-    val cw = cram.read(ctl.io.coeff(t) + io.coeffBase)     // 2x2 = [c00,c01,c10,c11]
+    val cw = cram.read((coeffD(t) + stageBase + io.coeffBase)(log2Ceil(cfg.coeffDepth) - 1, 0))
     bus(t).io.a := prsA.io.dout(2 * t)
     bus(t).io.b := prsA.io.dout(2 * t + 1)
     bus(t).io.c00 := cw(0); bus(t).io.c01 := cw(1)
     bus(t).io.c10 := cw(2); bus(t).io.c11 := cw(3)
-    bus(t).io.scale := io.scale
+    bus(t).io.scale := scaleD
   }
 
   // ---- PRS-B scatter ------------------------------------------------------
-  prsB.io.R := ctl.io.R
-  prsB.io.S := ctl.io.S
+  prsB.io.R := rD
+  prsB.io.S := sD
   for (t <- 0 until cfg.pBu) {
     prsB.io.xin(2 * t)     := bus(t).io.out0
     prsB.io.xin(2 * t + 1) := bus(t).io.out1
   }
 
-  // ---- write back in place ------------------------------------------------
-  bspm.io.wEn := state === sRun
+  // ---- BSPM write port: pipelined engine write, or debug write when idle --
+  // Per-bank write strobes let a debug write commit exactly one bank while the
+  // engine write drives all banks; the two never coincide (debug only idle).
+  val dbgWbank  = FlexBits.bsm(io.dbgWidx, m)
+  val dbgWdepth = (io.dbgWidx >> m.U).asUInt
   for (b <- 0 until P) {
-    bspm.io.wAddr(b) := ctl.io.addr(b)
-    bspm.io.wData(b) := prsB.io.dout(b)
+    val engineW = wEnD
+    val debugW  = io.dbgWen && !running && (b.U === dbgWbank)
+    bspm.io.wEn(b)   := engineW || debugW
+    bspm.io.wAddr(b) := Mux(engineW, addrD(b), dbgWdepth)
+    bspm.io.wData(b) := Mux(engineW, prsB.io.dout(b), io.dbgWval)
   }
 
-  io.dbgIdx := ctl.io.idx
   io.dbgR := ctl.io.R
   io.dbgS := ctl.io.S
 }

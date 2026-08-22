@@ -55,11 +55,11 @@ class CycleControl(val nMax: Int, val pBu: Int) extends Module {
   val jHi = (io.j >> 1).asUInt
   for (t <- 0 until pBu) {
     // in-row branch
-    val insT = Bits.insertZero(t.U((if (m>1) m-1 else 1).W), h, m - 1, m)
+    val insT = FlexBits.insertZero(t.U((if (m>1) m-1 else 1).W), h, m - 1, m)
     val hIn  = (io.j << m.U).asUInt | insT
     // two-row branch: H = ins(jHi, h-m); low part of I[2t] = 2t + e
     val hmm  = h - m.U
-    val Htwo = Bits.insertZero(jHi, hmm, nMax - m, nMax - m + 1)
+    val Htwo = FlexBits.insertZero(jHi, hmm, nMax - m, nMax - m + 1)
     val hTwo = (Htwo << m.U).asUInt | (2 * t).U | e
     lower(t) := Mux(inRow, hIn, hTwo)(idxW - 1, 0)
   }
@@ -74,13 +74,13 @@ class CycleControl(val nMax: Int, val pBu: Int) extends Module {
   // --- addresses: addr(bank) = idx >> m, scattered by bsm ------------------
   val addrInit = WireDefault(VecInit(Seq.fill(P)(0.U((nMax - m).W))))
   for (s <- 0 until P) {
-    val b = Bits.bsm(io.idx(s), m)
+    val b = FlexBits.bsm(io.idx(s), m)
     addrInit(b) := (io.idx(s) >> m.U).asUInt
   }
   io.addr := addrInit
 
   // --- PRS control ---------------------------------------------------------
-  io.R := Bits.bsm(io.idx(0), m)
+  io.R := FlexBits.bsm(io.idx(0), m)
   io.S := Mux(inRow, h(sW - 1, 0), 0.U)
 
   // --- coefficient address per butterfly -----------------------------------
