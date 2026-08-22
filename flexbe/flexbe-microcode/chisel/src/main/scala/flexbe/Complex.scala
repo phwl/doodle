@@ -31,20 +31,27 @@ object Fx {
   /** Round-to-nearest-even then saturate a `frac+guard`-bit accumulator back to
     * a Q(intBits).(fracBits) word.  `acc` carries `fracBits` extra low bits
     * from a full-precision product. */
-  def roundSat(acc: SInt, intBits: Int, fracBits: Int): SInt = {
+  def roundSat(acc: SInt, intBits: Int, fracBits: Int, scale: Bool = false.B): SInt = {
     val w      = intBits + fracBits
-    val shift  = fracBits
-    // convergent rounding: add half LSB, then correct the exactly-.5 tie to even
-    val half   = (BigInt(1) << (shift - 1)).S
+    // total right-shift back to the target LSB: fracBits guard bits, plus one
+    // more when the FFT stage scaling (/2) is active.  Keeping this as a single
+    // shift on one signed value avoids the different-width Mux that previously
+    // corrupted the sign on the negative path.
+    val shift  = Mux(scale, (fracBits + 1).U, fracBits.U)
+    val maxShift = fracBits + 1
+    val half   = (1.U << (shift - 1.U)).asSInt          // half an LSB at this shift
     val biased = acc +& half
     val shifted = (biased >> shift).asSInt
-    // tie-to-even: if the discarded bits were exactly 0.5, clear the LSB
-    val stickyMask = ((BigInt(1) << (shift - 1)) - 1)
-    val exactlyHalf = (acc(shift - 1) === 1.U) && ((acc.asUInt & stickyMask.U) === 0.U)
-    val rounded = Mux(exactlyHalf, (shifted & ~1.S(shifted.getWidth.W)).asSInt, shifted)
+    // round-to-even on an exact half: true when all bits below the LSB are the
+    // half bit set and the rest zero.
+    val lowMask = ((1.U << shift).asUInt - 1.U)
+    val halfBit = (1.U << (shift - 1.U)).asUInt
+    val exactlyHalf = (acc.asUInt & lowMask) === halfBit
+    val rounded = Mux(exactlyHalf, (shifted & (-2).S(shifted.getWidth.W)).asSInt, shifted)
     val hi = ((BigInt(1) << (w - 1)) - 1).S
     val lo = (-(BigInt(1) << (w - 1))).S
-    Mux(rounded > hi, hi, Mux(rounded < lo, lo, rounded))(w - 1, 0).asSInt
+    val sat = Mux(rounded > hi, hi, Mux(rounded < lo, lo, rounded))
+    sat(w - 1, 0).asSInt
   }
 }
 
@@ -81,10 +88,11 @@ class ButterflyUnit(intBits: Int = 1, fracBits: Int = 15) extends Module {
   val o1 = cadd(cmul(io.c10, io.a), cmul(io.c11, io.b))
 
   def finish(acc: (SInt, SInt)): Cplx = {
-    val re = Mux(io.scale, (acc._1 >> 1).asSInt, acc._1)
-    val im = Mux(io.scale, (acc._2 >> 1).asSInt, acc._2)
-    Cplx.wire(Fx.roundSat(re, intBits, fracBits),
-              Fx.roundSat(im, intBits, fracBits), intBits, fracBits)
+    // scale (optional /2) is folded into the rounding shift so there is a single
+    // fixed-width path; muxing two different-width SInts before rounding shifted
+    // the sign bit and produced sign flips on the negative path.
+    Cplx.wire(Fx.roundSat(acc._1, intBits, fracBits, io.scale),
+              Fx.roundSat(acc._2, intBits, fracBits, io.scale), intBits, fracBits)
   }
 
   io.out0 := finish(o0)
