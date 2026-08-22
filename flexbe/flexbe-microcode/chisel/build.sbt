@@ -1,30 +1,22 @@
-// FlexBE microcoded command processor -- Chisel build.
-//
-//   sbt test        run the ChiselSim tests (checks bsm / PRS / cycle_control
-//                   against the same golden vectors as the Python model, and
-//                   runs a 16-point FFT through the datapath)
-//   sbt "runMain flexbe.Emit"   emit SystemVerilog to generated/
-//
-// Requires JDK 17+ and network access to Maven Central on first build.
-
-ThisBuild / scalaVersion := "2.13.14"
-ThisBuild / organization := "flexbe"
-ThisBuild / version      := "0.1.0"
+ThisBuild / scalaVersion := "2.13.15"
 
 lazy val root = (project in file("."))
   .settings(
-    name := "flexbe-chisel",
+    name := "chisel-claude-verilator",
+    
     libraryDependencies ++= Seq(
-      "org.chipsalliance" %% "chisel"      % "6.6.0",
-      "org.scalatest"     %% "scalatest"   % "3.2.19" % "test"
+      // Core Chisel framework
+      "org.chipsalliance" %% "chisel" % "6.6.0",
+      
+      // Matched HTTP & JSON libraries matching Chisel's internal tree
+      "com.lihaoyi"       %% "requests" % "0.8.0",
+      "com.lihaoyi"       %% "upickle"  % "3.1.0",
+      
+      // Unit testing framework
+      "org.scalatest"     %% "scalatest" % "3.2.19" % Test
     ),
-    addCompilerPlugin(
-      "org.chipsalliance" % "chisel-plugin" % "6.6.0" cross CrossVersion.full),
-    scalacOptions ++= Seq(
-      "-language:reflectiveCalls",
-      "-deprecation",
-      "-feature",
-      "-Xcheckinit",
-      "-Ymacro-annotations"
-    )
+    
+    // Required macro compiler plugin matching your precise framework version
+    addCompilerPlugin("org.chipsalliance" % "chisel-plugin" % "6.6.0" cross CrossVersion.full)
   )
+
