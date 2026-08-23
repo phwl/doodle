@@ -1,9 +1,0 @@
-\newcommand{\breakdownrows}{%
-CC extraction: 4 $\times$ 32768-point FFT & 15,360 & 51.20 \\
-bit-reversal write-back & 1,024 & 3.41 \\
-8 $\times$ feature expansion (len 8, $\times$4) & 24,576 & 81.92 \\
-8 $\times$ MLP-0-\{0,1\} (len 32, 1024 rows) & 20,480 & 68.27 \\
-8 $\times$ MLP-1-\{0,1\} (len 32, 128 rows) & 2,560 & 8.53 \\
-8 $\times$ MLP-2-\{0,1\} (len 32, 16 rows) & 320 & 1.07 \\
-\midrule
-total & 64,320 & 214.4 \\}
