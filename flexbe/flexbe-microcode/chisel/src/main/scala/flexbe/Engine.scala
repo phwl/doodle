@@ -84,7 +84,10 @@ class Engine(cfg: EngineConfig = new EngineConfig) extends Module {
     is(sWrite) {                                       // commit; advance (k,j)
       when(j === lastJ) {
         j := 0.U
-        when(k === lastK || k === io.dbgMaxStage) { state := sDone }
+        // dbgMaxStage: if nonzero, stop after completing that stage index;
+        // 0 (the default) means run every stage.
+        val earlyStop = (io.dbgMaxStage =/= 0.U) && (k === io.dbgMaxStage)
+        when(k === lastK || earlyStop) { state := sDone }
           .otherwise { k := k + 1.U; state := sRead }
       }.otherwise { j := j + 1.U; state := sRead }
     }

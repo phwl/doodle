@@ -1,0 +1,45 @@
+[0m[[0m[0mdebug[0m] [0m[0mRunning TaskDef(flexbe.FlexBESpec, org.scalatest.tools.Framework$$anon$1@2801fb1, false, [SuiteSelector])[0m
+[0m[[0m[0mdebug[0m] [0m[0mRunning TaskDef(flexbe.StageDumpSpec, org.scalatest.tools.Framework$$anon$1@2801fb1, false, [SuiteSelector])[0m
+[0m[[0m[0mdebug[0m] [0m[0mRunning TaskDef(flexbe.EngineSimSpec, org.scalatest.tools.Framework$$anon$1@2801fb1, false, [SuiteSelector])[0m
+[0m[[0m[0mdebug[0m] [0m[0mRunning TaskDef(flexbe.EngineNumericSpec, org.scalatest.tools.Framework$$anon$1@2801fb1, false, [SuiteSelector])[0m
+[0m[[0m[0mdebug[0m] [0m[0mRunning TaskDef(flexbe.EngineDumpSpec, org.scalatest.tools.Framework$$anon$1@2801fb1, false, [SuiteSelector])[0m
+[0m[[0m[0mdebug[0m] [0m[0mRunning TaskDef(flexbe.ButterflyDiagSpec, org.scalatest.tools.Framework$$anon$1@2801fb1, false, [SuiteSelector])[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mFlexBESpec:[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mbsm[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should match the Python golden table for N=16, m=2[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should agree with the Python model over the full 15-bit range, m=5[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mSubsetPerm[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should match the Python subset permutations for P=4[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mPRS read map[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should reproduce read_map(R,S) for every R,S[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mCycleControl[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should reproduce the full 16-point golden trace[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mThe RTL[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should elaborate without error[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mButterflyDiagSpec:[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mButterflyUnit[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should report outputs for known operands[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngineNumericSpec:[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngine[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should compute a 16-point FFT matching the fixed-point model[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngineDumpSpec:[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngine[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should dump BSPM after a 16-point FFT[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngineSimSpec:[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngine[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should sequence one 16-point transform (start -> busy -> done)[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mStageDumpSpec:[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mEngine[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32m- should match golden BSPM after each stage[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[36mRun completed in 36 seconds, 931 milliseconds.[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[36mTotal number of tests run: 11[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[36mSuites: completed 6, aborted 0[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[36mTests: succeeded 11, failed 0, canceled 0, ignored 0, pending 0[0m[0m
+[0m[[0m[0minfo[0m] [0m[0m[32mAll tests passed.[0m[0m
+[0m[[0m[0mdebug[0m] [0m[0mPassed tests:[0m
+[0m[[0m[0mdebug[0m] [0m[0m	flexbe.EngineDumpSpec[0m
+[0m[[0m[0mdebug[0m] [0m[0m	flexbe.EngineNumericSpec[0m
+[0m[[0m[0mdebug[0m] [0m[0m	flexbe.FlexBESpec[0m
+[0m[[0m[0mdebug[0m] [0m[0m	flexbe.StageDumpSpec[0m
+[0m[[0m[0mdebug[0m] [0m[0m	flexbe.ButterflyDiagSpec[0m
+[0m[[0m[0mdebug[0m] [0m[0m	flexbe.EngineSimSpec[0m

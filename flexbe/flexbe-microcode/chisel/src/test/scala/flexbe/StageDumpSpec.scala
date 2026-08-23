@@ -12,7 +12,7 @@ class StageDumpSpec extends AnyFlatSpec with Matchers {
     val cfg = new EngineConfig(nMax = 4, pBu = 2, depth = 16, coeffDepth = 32)
     try {
       // run once per max-stage, dumping after that stage
-      for (maxStage <- 0 until 4) {
+      for (maxStage <- 1 until 4) {
         simulate(new Engine(cfg)) { c =>
           c.io.start.poke(false.B); c.io.dbgWen.poke(false.B); c.io.cWen.poke(false.B)
           c.io.nCur.poke(4.U); c.io.scale.poke(true.B); c.io.coeffBase.poke(0.U)
