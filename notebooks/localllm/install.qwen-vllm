@@ -1,0 +1,70 @@
+To install and run Qwen 3.8 27B with FP8 precision on an RTX 4000 (24GB VRAM) running Ubuntu, the most efficient and standard choice is to use vLLM.
+An FP8 quantized 27B model requires roughly 27–28 GB of VRAM for the weights alone if unoptimized. However, vLLM uses advanced KV cache management and memory optimization that allows it to tightly fit and run efficiently on a single 24GB card. [1, 2, 3] 
+## Step 1: Install System Prerequisites
+Ensure your NVIDIA drivers and CUDA toolkit are updated on Ubuntu. vLLM requires CUDA 12.1 or higher.
+
+# Update package list
+sudo apt update && sudo apt upgrade -y
+# Install Python pip and venv if not already installed
+sudo apt install python3-pip python3-venv -y
+
+## Step 2: Set Up a Virtual Environment & Install vLLM
+It is highly recommended to isolate your LLM dependencies inside a Python virtual environment.
+
+# Create and activate environment
+python3 -m venv qwen-env
+source qwen-env/bin/activate
+# Install vLLM and the Hugging Face CLI
+pip install -U pip
+pip install vllm huggingface_hub
+
+## Step 3: Download the FP8 Weights
+You can pull the official or community-vetted FP8 version of the model directly using the Hugging Face CLI. [4] 
+
+# Log in if the repository requires it (usually Apache 2.0 open weights don't, but good practice)
+huggingface-cli login
+# Download the model (Replace with the exact official Qwen FP8 repo path if available)# Example: Qwen/Qwen3.8-27B-Instruct-FP8
+huggingface-cli download Qwen/Qwen3.8-27B-Instruct-FP8 --local-dir ./Qwen3.8-27B-FP8
+
+## Step 4: Launch the Server (Optimized for 24GB VRAM)
+Because 24GB is a strict ceiling for a 27B FP8 model, you must tune vLLM's memory parameters (gpu-memory-utilization and max-model-len) so the KV cache does not overflow your VRAM. [2, 3] 
+Run the following command to spin up an OpenAI-compatible API server:
+
+vllm serve ./Qwen3.8-27B-FP8 \
+  --quantization fp8 \
+  --gpu-memory-utilization 0.95 \
+  --max-model-len 4096 \
+  --port 8000
+
+
+* 
+* --quantization fp8: Forces the engine to utilize FP8 execution.
+* --gpu-memory-utilization 0.95: Allocates 95% of your 24GB card to the model weights and cache.
+* --max-model-len 4096: Caps the context window at 4K tokens to save VRAM. If you get Out-of-Memory (OOM) errors during inference, lower this to 2048.
+* 
+
+## Step 5: Test the Deployment
+Open a new terminal window, activate your environment, and send a test request to your local server:
+
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "./Qwen3.8-27B-FP8",
+    "messages": [{"role": "user", "content": "Explain quantum computing in one short sentence."}]
+  }'
+
+If you run into memory errors or want to tweak performance, let me know:
+
+* 
+* Did the server throw an Out of Memory (OOM) error on startup?
+* Are you planning to use the model for long-context/rag tasks (which demand a larger KV cache)?
+* Would you prefer an easier alternate setup like Ollama or llama.cpp using 4-bit or 5-bit GGUF quants instead?
+* 
+
+
+[1] [https://www.reddit.com](https://www.reddit.com/r/LocalLLaMA/comments/1w10qem/qwen3827b_on_a_24gb_rtx_pro_4000_blackwell_128k/)
+[2] [https://www.yottalabs.ai](https://www.yottalabs.ai/post/qwen-3-8-27b-specs-hardware-requirements-how-to-run-2026)
+[3] [https://www.alibabacloud.com](https://www.alibabacloud.com/blog/what-it-actually-takes-to-run-qwen3-8-27b-locally_603428)
+[4] [https://www.youtube.com](https://www.youtube.com/watch?v=PTuGGdDuyPI)
+
+

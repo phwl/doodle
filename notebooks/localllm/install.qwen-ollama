@@ -1,0 +1,66 @@
+
+Setting up Qwen 3.8 27B via [Ollama](https://ollama.com/orcarouter/Qwen3.8-27B-Uncensored) is incredibly straightforward. However, because your RTX 4000 SFF operates with 20GB of VRAM, you must manually configure Ollama's memory settings to keep the model locked entirely inside your GPU memory and prevent sluggish system slowdowns. [1, 2] 
+Follow these sequential steps to install, optimize, and launch the model cleanly.
+## Step 1: Install Ollama
+If you haven't already, download and run the installer for your operating system from the official platform:
+
+* 
+* Go to the [Ollama Download Page](https://ollama.com/download) and grab the installer.
+* Run the executable and let it initialize in the background (you will see the Ollama icon appear in your taskbar system tray).
+* 
+
+## Step 2: Configure VRAM Headroom Variables
+By default, Ollama will try to allocate a massive context window for Qwen 3.8, which will immediately spill past your 20GB boundary and cause terrible performance. You need to tell Ollama to save memory by using Flash Attention. [2] 
+On Windows:
+
+   1. Open your Start Menu, search for "Environment Variables", and click Edit the system environment variables.
+   2. Click the Environment Variables... button at the bottom.
+   3. Under User variables, click New... and add:
+   * Variable name: OLLAMA_FLASH_ATTENTION
+      * Variable value: 1
+   4. Click OK to save, then restart any open terminal windows. [3] 
+
+On Linux:
+Edit your system service setup (/etc/systemd/system/ollama.service.d/override.conf) and append: [3] 
+
+[Service]
+Environment="OLLAMA_FLASH_ATTENTION=1"
+
+Then reload and restart the service via sudo systemctl daemon-reload && sudo systemctl restart ollama. [3] 
+## Step 3: Pull and Run Qwen 3.8 27B
+Open your command prompt, PowerShell, or terminal, and execute the run command. Ollama automatically defaults the standard qwen3.8:27b tag to a highly optimized 4-bit quantization (Q4_K_M), which lands at roughly 18GB. This leaves just enough wiggle room for your 20GB card. [2, 4, 5] 
+
+ollama run qwen3.8:27b
+
+The terminal will display a progress bar while it pulls the ~18GB layer files. Once completed, you will be dropped directly into an interactive command-line chat session. [4, 5] 
+## Step 4: The Developer Modelfile (Recommended)
+Because you are using this specifically for coding, you will want the ability to manipulate the model's native overthinking loop. You can create a custom version of the model that strictly caps the context window so it fits safely into your GPU.
+
+   1. Create a blank text file on your computer named Modelfile (no file extension).
+   2. Open it in a text editor and paste the following parameters:
+
+FROM qwen3.8:27b
+# Cap the context window to prevent 20GB VRAM overflow
+PARAMETER num_ctx 8192
+# Restrict maximum thinking tokens so it doesn't loop infinitely
+PARAMETER num_predict 2048
+# Optional: Add a system prompt to keep code generation concise
+SYSTEM "You are a concise programming assistant. Provide clean, functional code with minimal explanation unless asked."
+
+
+   1. Save the file, open your terminal in that exact folder, and build your custom coding variant:
+
+ollama create qwen-coder -f ./Modelfile
+
+Now you can call your optimized, safe-context version at any time using:
+
+ollama run qwen-coder
+
+To connect this to your development pipeline, let me know what IDE tool or extension you use (such as VS Code's Continue, Aider, or Cursor). I can provide the quick configuration block needed to route your coding requests to this local Ollama backend.
+
+[1] [https://www.yottalabs.ai](https://www.yottalabs.ai/post/how-to-run-qwen-3-8-with-ollama-2026)
+[2] [https://shop.zimaspace.com](https://shop.zimaspace.com/blogs/tech-ai-hub/run-qwen3-8-27b-locally-ram-vram-ollama)
+[3] [https://ollama.com](https://ollama.com/smtek/Qwen3.8-27B)
+[4] [https://www.yottalabs.ai](https://www.yottalabs.ai/post/how-to-run-qwen-3-8-with-ollama-2026)
+[5] [https://www.orcarouter.ai](https://www.orcarouter.ai/blog/qwen-3-8-27b-ollama)
+
