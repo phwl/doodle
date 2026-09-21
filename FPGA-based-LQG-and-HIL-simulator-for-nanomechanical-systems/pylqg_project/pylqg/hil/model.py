@@ -261,7 +261,16 @@ class HILSimModel:
     def export_model(self):
         """Time-discrete fixed-point model: every constant quantised to its hardware format."""
         d = self.export_model_dbl()
-        cq = lambda v: int(to_raw(v, *C_FMT, "nearest", "sat"))
+        self.quantisation_issues = issues = []
+        lo_, hi_ = -(1 << (C_FMT[0] - 1)), (1 << (C_FMT[0] - 1)) - 1
+
+        def cq(v, what="constant"):
+            raw = int(to_raw(v, *C_FMT, "nearest", "sat"))
+            if raw in (lo_, hi_) and abs(v) * (1 << C_FMT[1]) > hi_:
+                issues.append(f"{what} = {v:.3g} saturates the sfix18_10 range (+-{hi_ / (1 << C_FMT[1]):.0f})")
+            elif raw == 0 and v != 0:
+                issues.append(f"{what} = {v:.3g} underflows to 0 (resolution 2^-10)")
+            return raw
         lq = lambda a: to_raw(np.asarray(a, float), *N_FMT, "nearest", "sat").astype(np.int64)
         def nq(n):
             return dict(enabled=n["enabled"], presc=cq(n["presc"]), gain=cq(n["gain"]), lut=lq(n["lut"]))
@@ -269,17 +278,23 @@ class HILSimModel:
         m["int_dt_res"] = cq(TS * 2.0 ** d["int_scale_bits"])
         m["slices"] = []
         for s in d["slices"]:
-            q = dict(x_presc_bitshift=s["x_presc_bitshift"], x_presc_mul=cq(s["x_presc_mul"]),
-                     xd_presc_bitshift=s["xd_presc_bitshift"], xd_presc_mul=cq(s["xd_presc_mul"]))
+            j = len(m["slices"])
+            q = dict(x_presc_bitshift=s["x_presc_bitshift"], x_presc_mul=cq(s["x_presc_mul"], f"slice{j} x prescaler"),
+                     xd_presc_bitshift=s["xd_presc_bitshift"], xd_presc_mul=cq(s["xd_presc_mul"], f"slice{j} xdot prescaler"))
             for k in ("u", "x", "xd"):
-                q[k] = dict(mux=s[k]["mux"], gain=cq(s[k]["gain"]),
-                            nlf=dict(presc=cq(s[k]["nlf"]["presc"]), gain=cq(s[k]["nlf"]["gain"]),
+                q[k] = dict(mux=s[k]["mux"], gain=cq(s[k]["gain"], f"slice{j} {k} gain"),
+                            nlf=dict(presc=cq(s[k]["nlf"]["presc"], f"slice{j} {k}-NLF prescaler"), gain=cq(s[k]["nlf"]["gain"], f"slice{j} {k}-NLF gain"),
                                      lut=lq(s[k]["nlf"]["lut"]), lut_alt=lq(s[k]["nlf"]["lut_alt"])))
             m["slices"].append(q)
         m["adc_nlf"] = [nq(n) for n in d["adc_nlf"]]
-        m["inp"] = [[cq(v) for v in row] for row in d["inp"]]
-        m["noise_presc"] = [cq(v) for v in d["noise_presc"]]
-        m["out"] = [dict(sel=o["sel"], fac=[cq(v) for v in o["fac"]], nlf=[nq(n) for n in o["nlf"]]) for o in d["out"]]
+        m["inp"] = [[cq(v, f"input matrix slice{j} {nm}") for v, nm in zip(row, ("<-adc0", "<-adc1", "<-noise"))] for j, row in enumerate(d["inp"])]
+        m["noise_presc"] = [cq(v, f"noise prescaler slice{j}") for j, v in enumerate(d["noise_presc"])]
+        m["out"] = [dict(sel=o["sel"], fac=[cq(v, f"output {i} factor {j}") for j, v in enumerate(o["fac"])], nlf=[nq(n) for n in o["nlf"]]) for i, o in enumerate(d["out"])]
+        if issues:
+            import warnings
+            warnings.warn("HIL model constants do not fit the hardware formats - the fixed-point simulation will be wrong "
+                          "(typically because coefficients differ by more than ~1e3, e.g. a noise power that dwarfs the signal path):\n  "
+                          + "\n  ".join(issues[:8]) + (f"\n  ... and {len(issues) - 8} more" if len(issues) > 8 else ""), RuntimeWarning, stacklevel=3)
         return m
 
     # -- compile ------------------------------------------------------------------

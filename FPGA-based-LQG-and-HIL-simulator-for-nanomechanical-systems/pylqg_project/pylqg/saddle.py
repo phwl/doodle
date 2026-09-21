@@ -49,7 +49,7 @@ def build_plant(noise_mode: str = "variance", noise_pwr: float | None = None, no
     s0.x_factor = -OMEGA1 ** 2
     s0.xdot_factor = -GAMMA
     s1.u_factor = 1 / M; s1.x_factor = -OMEGA2 ** 2; s1.xdot_factor = -GAMMA
-    s2.u_factor = 0.0; s2.x_factor = -1.0; s2.xdot_factor = -GAMMA
+    s2.u_factor = s2.x_factor = s2.xdot_factor = 0.0                       # third slice unused: fully inert
     return model
 
 

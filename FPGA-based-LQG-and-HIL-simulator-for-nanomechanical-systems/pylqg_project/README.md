@@ -82,3 +82,18 @@ assumes. `examples/saddle_demo.py` therefore defaults to `--noise-mode psd`.
   Vitis `sim_hwimpl` model, DMA memory streaming for the LQG, Z/φ axes in closed loop (design supports them,
   untested), input/output NLF stages beyond compilation (only the x‑path NLF + alternate is tested).
 * Speed: ≈60 µs per controller step, ≈1.3 s wall time per simulated millisecond of closed loop (pure Python).
+
+## Tutorial notebook
+
+`notebooks/pylqg_tutorial.ipynb` is a full, executed tutorial (about 3 minutes to re-run): the state-space model and its exact
+discretisation, derivations (with proofs and numerical checks) of the Kalman filter, the LQR and the LQG separation principle,
+the FPGA implementation (shift-float coefficients, state scaling, bit-exact datapath, latency), the HIL simulator
+(integrator analysis, lookup tables, noise, scaling) and reproductions of the paper's saddle-potential example and of the
+single-particle double-well example. It needs only NumPy, SciPy and Matplotlib plus this package; open it from the
+`notebooks/` folder (or put `pylqg_project/` next to it) and run all cells.
+
+## Compile-time range check (HIL)
+
+`HILSimModel.compile()` now emits a `RuntimeWarning` (and lists them in `model.quantisation_issues`) when a constant
+saturates or underflows the sfix18_10 format, e.g. when a noise power dwarfs the signal path. Without this check such a model
+compiles silently and the fixed-point engine returns all zeros.
