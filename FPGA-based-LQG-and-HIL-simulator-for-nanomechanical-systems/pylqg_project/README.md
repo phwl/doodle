@@ -88,8 +88,8 @@ assumes. `examples/saddle_demo.py` therefore defaults to `--noise-mode psd`.
 `notebooks/pylqg_tutorial.ipynb` is a full, executed tutorial (about 3 minutes to re-run): the state-space model and its exact
 discretisation, derivations (with proofs and numerical checks) of the Kalman filter, the LQR and the LQG separation principle,
 the FPGA implementation (shift-float coefficients, state scaling, bit-exact datapath, latency), the HIL simulator
-(integrator analysis, lookup tables, noise, scaling) and reproductions of the paper's saddle-potential example and of the
-single-particle double-well example. It needs only NumPy, SciPy and Matplotlib plus this package; open it from the
+(integrator analysis, lookup tables, noise, scaling) reproductions of the paper's saddle-potential example and of the
+single-particle double-well example, and an estimate (measured compute speed plus a latency-budget analysis) of what a general-purpose PC could do instead of the FPGA. It needs only NumPy, SciPy and Matplotlib plus this package; open it from the
 `notebooks/` folder (or put `pylqg_project/` next to it) and run all cells.
 
 ## Compile-time range check (HIL)
