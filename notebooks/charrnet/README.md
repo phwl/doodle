@@ -18,6 +18,7 @@ Start with **`charrnet_tutorial.ipynb`**, which explains the implementation from
 | `fig2.py` | Fig. 2 experiment (equivariance/invariance under ideal vs physical channel, rect vs Kaiser window) |
 | `report.py` | Builds `table1.md` and `table1_comparison.png` |
 | `fig_overview.py`, `export_slide_data.py`, `build_slide.js`, `apply_theme.js` | Overview figure (PNG/PDF) and the native-shape PowerPoint slide (`SCALE=0.6 node build_slide.js`) |
+| `charrnet_ablation.ipynb` | Ablation adding SurReal's second wFM layer and G-transport (`train.py --variant deep | deep_gt`) |
 | `gradcheck.py` | Finite-difference check of all gradients (max relative error < 5e-5) |
 
 ## Running

@@ -26,6 +26,7 @@ def main():
     ap.add_argument('--models', default='baseline,charrnet')
     ap.add_argument('--train_sets', default='Pristine,nLOS 200')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--variant', default='base', help="ChaRRNet variant: base | deep | deep_gt")
     ap.add_argument('--out', default='results.json')
     a = ap.parse_args()
 
@@ -47,7 +48,7 @@ def main():
         test_x = {k: M.prep(X) for k, (X, _) in tests.items()}
         for tname, ((Xtr, ytr), (Xva, yva)) in trains.items():
             mrng = np.random.default_rng(a.seed + 1)
-            model = M(a.devices, mrng)
+            model = M(a.devices, mrng, variant=a.variant) if mname == 'charrnet' else M(a.devices, mrng)
             n_par = sum(p.data.size for p in model.params())
             opt = ag.Adam(model.params(), lr=a.lr, wd=1e-4)
             xtr, xva = M.prep(Xtr), M.prep(Xva)

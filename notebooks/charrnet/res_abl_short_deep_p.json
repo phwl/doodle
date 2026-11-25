@@ -1,0 +1,30 @@
+{
+ "args": {
+  "devices": 20,
+  "train_per_dev": 100,
+  "test_per_dev": 10,
+  "epochs": 20,
+  "lr": 0.001,
+  "pole_sigma": 0.1,
+  "models": "charrnet",
+  "train_sets": "Pristine",
+  "seed": 0,
+  "variant": "deep",
+  "out": "res_abl_short_deep_p.json"
+ },
+ "results": {
+  "charrnet|Pristine": {
+   "params": 308436,
+   "val": 0.27,
+   "test": {
+    "Pristine": 0.23,
+    "nLOS 10": 0.17,
+    "LOS 10": 0.19,
+    "nLOS 30": 0.225,
+    "LOS 100": 0.2,
+    "nLOS 400": 0.205,
+    "LOS 400": 0.24
+   }
+  }
+ }
+}

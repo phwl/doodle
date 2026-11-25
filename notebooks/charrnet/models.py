@@ -116,15 +116,29 @@ def invariant_layer(lr, th, w_raw, K, s):
     return d.transpose(0, 1, 3, 2, 4).reshape(B, C * Kk, To, F)
 
 
+def g_transport(lr, th, a, p):
+    """SurReal's G-transport: act on every value of channel c with the group element
+    (e^{a_c}, R(p_c)), i.e. a per-channel translation in the tangent space. It commutes
+    with the channel's per-bin translation, so equivariance is preserved."""
+    return lr + a, th + p
+
+
 class ChaRRNet(Model):
     def __init__(self, n_cls, rng, T_in=None, F=None, C1=8, K1=4, S1=2, K2=4, S2=4,
-                 ch=(64, 64), hid=128):
+                 ch=(64, 64), hid=128, variant='base', K1b=3, S1b=1):
+        """variant: 'base'    one wFM layer (as in the main results)
+                   'deep'    two stacked wFM layers
+                   'deep_gt' two wFM layers, each followed by G-transport (SurReal)"""
+        assert variant in ('base', 'deep', 'deep_gt')
+        self.variant, self.K1b, self.S1b = variant, K1b, S1b
         T_in = (640 - NFFT) // HOP + 1 if T_in is None else T_in
         F = NFFT if F is None else F
         self.K1, self.S1, self.K2, self.S2 = K1, S1, K2, S2
         self.weq = T((0.1 * rng.standard_normal((C1, 1, K1))).astype(np.float32), param=True)
         self.winv = T((0.1 * rng.standard_normal((1, C1, K2))).astype(np.float32), param=True)
         T1 = (T_in - K1) // S1 + 1
+        if variant != 'base':
+            T1 = (T1 - K1b) // S1b + 1
         T2 = (T1 - K2) // S2 + 1
         cin = C1 * K2 * T2
         self.cw0 = ag.param((ch[0], cin, 5), rng); self.cb0 = ag.zeros((ch[0],))
@@ -134,6 +148,11 @@ class ChaRRNet(Model):
         # learned per-input-channel normalisation of invariant features
         self.g = T(np.ones((1, cin, 1), np.float32), param=True)
         self.gb = ag.zeros((1, cin, 1))
+        if variant != 'base':      # created last, so 'base' keeps its original initialisation
+            self.weq2 = T((0.1 * rng.standard_normal((C1, C1, K1b))).astype(np.float32), param=True)
+        if variant == 'deep_gt':   # G-transport: one learned (ln-gain, rotation) per channel and layer
+            self.gt_a1, self.gt_p1 = ag.zeros((1, C1, 1, 1)), ag.zeros((1, C1, 1, 1))
+            self.gt_a2, self.gt_p2 = ag.zeros((1, C1, 1, 1)), ag.zeros((1, C1, 1, 1))
 
     @staticmethod
     def prep(X, window='kaiser'):
@@ -142,7 +161,15 @@ class ChaRRNet(Model):
 
     def equivariant(self, x):
         lr, th = T(x[:, :1]), T(x[:, 1:])
-        return wfm_conv(lr, th, self.weq, self.K1, self.S1)
+        lr, th = wfm_conv(lr, th, self.weq, self.K1, self.S1)
+        if self.variant == 'base':
+            return lr, th
+        if self.variant == 'deep_gt':
+            lr, th = g_transport(lr, th, self.gt_a1, self.gt_p1)
+        lr, th = wfm_conv(lr, th, self.weq2, self.K1b, self.S1b)
+        if self.variant == 'deep_gt':
+            lr, th = g_transport(lr, th, self.gt_a2, self.gt_p2)
+        return lr, th
 
     def invariant(self, x):
         lr, th = self.equivariant(x)

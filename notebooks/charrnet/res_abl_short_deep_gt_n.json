@@ -1,0 +1,30 @@
+{
+ "args": {
+  "devices": 20,
+  "train_per_dev": 100,
+  "test_per_dev": 10,
+  "epochs": 20,
+  "lr": 0.001,
+  "pole_sigma": 0.1,
+  "models": "charrnet",
+  "train_sets": "nLOS 200",
+  "seed": 0,
+  "variant": "deep_gt",
+  "out": "res_abl_short_deep_gt_n.json"
+ },
+ "results": {
+  "charrnet|nLOS 200": {
+   "params": 308468,
+   "val": 0.21,
+   "test": {
+    "Pristine": 0.155,
+    "nLOS 10": 0.22,
+    "LOS 10": 0.21,
+    "nLOS 30": 0.21,
+    "LOS 100": 0.195,
+    "nLOS 400": 0.21,
+    "LOS 400": 0.195
+   }
+  }
+ }
+}
