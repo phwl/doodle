@@ -1,0 +1,29 @@
+{
+ "args": {
+  "devices": 65,
+  "train_per_dev": 100,
+  "test_per_dev": 20,
+  "epochs": 50,
+  "lr": 0.001,
+  "pole_sigma": 0.1,
+  "models": "baseline",
+  "train_sets": "Pristine",
+  "seed": 0,
+  "out": "res_bl_p.json"
+ },
+ "results": {
+  "baseline|Pristine": {
+   "params": 188097,
+   "val": 0.9846153846153847,
+   "test": {
+    "Pristine": 0.9876923076923076,
+    "nLOS 10": 0.10230769230769231,
+    "LOS 10": 0.08846153846153847,
+    "nLOS 30": 0.08923076923076922,
+    "LOS 100": 0.10461538461538461,
+    "nLOS 400": 0.11461538461538462,
+    "LOS 400": 0.08076923076923077
+   }
+  }
+ }
+}

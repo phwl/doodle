@@ -1,3 +1,0 @@
-[submodule "ipcoreconfig"]
-	path = ipcoreconfig
-	url = git@gitlab.tuwien.ac.at:e376-acin/cds/quantum/levitated-nanoparticles/ipcoreconfig.git

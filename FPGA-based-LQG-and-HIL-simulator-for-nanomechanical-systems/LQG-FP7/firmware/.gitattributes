@@ -1,3 +1,0 @@
-vivado/bitstreams/*.bit filter=lfs diff=lfs merge=lfs -text
-vivado/bitstreams/*.bin filter=lfs diff=lfs merge=lfs -text
-package/*.tar.gz filter=lfs diff=lfs merge=lfs -text

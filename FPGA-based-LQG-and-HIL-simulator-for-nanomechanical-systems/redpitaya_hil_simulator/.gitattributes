@@ -1,3 +1,0 @@
-ipcore/golden_images/*.bit filter=lfs diff=lfs merge=lfs -text
-ipcore/golden_images/*.bin filter=lfs diff=lfs merge=lfs -text
-package/*.tar.gz filter=lfs diff=lfs merge=lfs -text
